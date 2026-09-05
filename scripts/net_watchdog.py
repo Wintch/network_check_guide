@@ -36,6 +36,40 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+# -- colored/tidy terminal output ---------------------------------------
+# ANSI only when stdout is an actual terminal (never when piped to a file
+# or captured by systemd/journalctl) and NO_COLOR isn't set -- degrades to
+# plain text automatically everywhere else.
+_USE_COLOR = sys.stdout.isatty() and not os.environ.get("NO_COLOR")
+_COLORS = {"green": "32", "yellow": "33", "red": "31", "cyan": "36", "bold": "1"}
+
+
+def c(text, *styles):
+    if not _USE_COLOR:
+        return text
+    codes = ";".join(_COLORS[s] for s in styles)
+    return f"\033[{codes}m{text}\033[0m"
+
+
+QUICKSTART = """\
+COMO USARLO (guia rapida)
+  Prueba corta, 1 minuto, para ver que funciona:
+    python3 net_watchdog.py --duration 60 --heartbeat 15
+
+  Corrida real, vigilando ademas retransmisiones a un host puntual:
+    python3 net_watchdog.py --duration 1200 --hosts api.anthropic.com
+
+  Ver el resultado de una corrida anterior en formato legible:
+    python3 net_watchdog.py --report ~/.local/state/net_watchdog/summary_<fecha>.json
+
+  Dejarlo instalado para que corra solo cada 3 dias (no hace falta
+  tenerlo abierto en una terminal): ver 09_BACKGROUND_WATCHDOG.md.
+
+  Mientras corre: no hace falta mirar la pantalla -- si encuentra algo
+  aparece ahi mismo (y como notificacion de escritorio) al instante. El
+  resumen final, al terminar, es siempre el mismo bloque que ves abajo.
+"""
+
 
 def sh(cmd, timeout=5):
     try:
@@ -126,6 +160,75 @@ def check_periodicity(gap_times, tolerance=0.25):
     if stdev / mean < tolerance:
         return mean
     return None
+
+
+# Plain-language label for each anomaly kind, used in the human-readable
+# report -- keep in sync with the `kind` strings passed to alert().
+KIND_LABELS = {
+    "ping_gap": "Corte puntual de ping al gateway",
+    "periodic_gap_pattern": "Patron de cortes PERIODICOS (firma del caso 06_CASE_STUDY)",
+    "retrans_growth": "Retransmisiones TCP en aumento sostenido",
+    "wifi_signal": "Senal Wi-Fi por debajo del umbral",
+    "wifi_tx_failed_burst": "Rafaga de fallos de transmision Wi-Fi",
+    "carrier_flap": "El NIC/enlace se cayo y volvio (carrier flap)",
+    "no_gateway": "No se pudo determinar el gateway -- no se puede vigilar el ping",
+    "no_ping": "No se encontro el binario `ping` -- no se puede vigilar el ping",
+}
+
+
+def format_human_report(summary):
+    """Render a summary dict (same shape as summary_*.json) as a tidy,
+    color-coded (when on a real terminal) human report: what was watched,
+    what was found, what to do -- in that order, every time."""
+    bar = "─" * 64
+    L = []
+    L.append(c("═" * 64, "cyan"))
+    L.append(c("  Network Watchdog -- resumen de la corrida", "bold", "cyan"))
+    L.append(c("═" * 64, "cyan"))
+    L.append(c("  Que se vigilo", "bold"))
+    wifi_bit = f"si ({summary['wlan_iface']})" if summary.get("wlan_iface") else "no aplica (enlace cableado / sin Wi-Fi detectada)"
+    L.append(f"  Gateway (cortes de ping):    {summary.get('gateway') or '(no detectado)'}")
+    L.append(f"  Interfaz principal:          {summary.get('iface') or '(no detectada)'}")
+    L.append(f"  Wi-Fi vigilada:              {wifi_bit}")
+    hosts = summary.get("hosts") or []
+    L.append(
+        "  Hosts (retransmisiones TCP): "
+        + (", ".join(hosts) if hosts else "ninguno -- pasa --hosts para activar este chequeo")
+    )
+    dur = summary.get("started_duration_seconds")
+    if dur:
+        L.append(f"  Duracion configurada:        {dur}s (~{dur // 60} min)")
+    L.append(bar)
+
+    anomalies = summary.get("anomalies") or []
+    if summary.get("verdict") == "OK":
+        L.append(c("  ✔ OK", "bold", "green") + " -- no se detecto ninguna anomalia en esta corrida.")
+        L.append("  No hay nada que revisar ni que hacer.")
+    else:
+        L.append(c(f"  ⚠ SE ENCONTRARON {len(anomalies)} PROBLEMA(S)", "bold", "yellow"))
+        L.append("")
+        for i, a in enumerate(anomalies, 1):
+            label = KIND_LABELS.get(a.get("kind"), a.get("kind", "?"))
+            L.append(f"  {i}. " + c(f"[{a.get('ts', '?')}] {label}", "bold", "yellow"))
+            L.append(f"     -> {a.get('message', '')}")
+            L.append("")
+        L.append(bar)
+        L.append(c("  Que hacer ahora", "bold"))
+        L.append("  No reinicies ni cambies nada a ciegas. Cada mensaje de arriba ya te")
+        L.append("  dice que archivo de la guia seguir (03_/04_/05_) y que seccion mirar")
+        L.append("  primero -- segui esa lista de a un item por vez, en orden.")
+    pcap = summary.get("pcap")
+    if pcap:
+        L.append("")
+        L.append(f"  Captura de paquetes guardada: {pcap}")
+        L.append("  (abrila con `tcpdump -r <archivo>` o Wireshark)")
+    L.append(bar)
+    sp = summary.get("_summary_path")
+    if sp:
+        L.append(f"  Detalle completo (JSON) de esta corrida: {sp}")
+    L.append(f"  Para releer este mismo resumen mas tarde: --report {sp or '<summary.json>'}")
+    L.append(c("═" * 64, "cyan"))
+    return "\n".join(L)
 
 
 class Watchdog:
@@ -333,22 +436,47 @@ class Watchdog:
                     {"from": self.carrier_start, "to": now_cc},
                 )
 
+    def print_heartbeat(self, deadline):
+        remaining = max(0, int(deadline - time.monotonic()))
+        mm, ss = divmod(remaining, 60)
+        if not self.anomalies:
+            status = c("✔ todo en orden", "green")
+        else:
+            status = c(f"⚠ {len(self.anomalies)} anomalia(s) hasta ahora", "yellow", "bold")
+        now = datetime.now().strftime("%H:%M:%S")
+        print(f"[{now}] sigue chequeando ({status}) -- quedan ~{mm}m{ss:02d}s", flush=True)
+
     def run(self):
-        print(
-            f"net_watchdog: gateway={self.gateway} iface={self.iface} "
-            f"wlan_iface={self.wlan_iface} hosts={list(self.host_ips)} "
-            f"duration={self.args.duration}s log_dir={self.log_dir}"
-        )
+        if sys.stdout.isatty():
+            print(QUICKSTART)
+        print(c("Arrancando el watchdog de red.", "bold"))
+        print("Que se esta vigilando en esta corrida:")
+        print(f"  Gateway (cortes de ping):     {self.gateway or c('(no detectado -- este chequeo queda deshabilitado)', 'yellow')}")
+        wifi_line = self.wlan_iface if self.wlan_iface else "no detectada (enlace cableado, este chequeo no aplica)"
+        print(f"  Interfaz / Wi-Fi:             {self.iface or '(no detectada)'}  |  wifi: {wifi_line}")
+        hosts_line = ", ".join(self.host_ips) if self.host_ips else c("ninguno -- pasa --hosts para vigilar retransmisiones TCP", "yellow")
+        print(f"  Hosts vigilados (ss -tin):    {hosts_line}")
+        print(f"  Duracion:                     {self.args.duration}s (~{self.args.duration // 60} min)")
+        print(f"  Logs / alertas en:            {self.log_dir}")
+        print("Corriendo... (Ctrl+C corta antes de tiempo y igual escribe el resumen. Una")
+        print("alerta aparece aca mismo, al instante, apenas se detecta algo -- no hace")
+        print("falta estar mirando.)")
+        print()
+
         t = threading.Thread(target=self.ping_thread, daemon=True)
         t.start()
 
         deadline = time.monotonic() + self.args.duration
+        last_heartbeat = time.monotonic()
         try:
             while time.monotonic() < deadline and not self.stop_event.is_set():
                 self.sample_once()
+                if self.args.heartbeat > 0 and time.monotonic() - last_heartbeat >= self.args.heartbeat:
+                    self.print_heartbeat(deadline)
+                    last_heartbeat = time.monotonic()
                 time.sleep(self.args.interval)
         except KeyboardInterrupt:
-            pass
+            print("\nCortado a mano (Ctrl+C) -- cerrando y escribiendo el resumen igual.")
         finally:
             self.stop_event.set()
             proc = getattr(self, "_ping_proc", None)
@@ -375,30 +503,35 @@ class Watchdog:
         with open(self.summary_path, "w") as f:
             json.dump(summary, f, indent=2)
 
-        if verdict == "OK":
-            print(f"net_watchdog: OK, no anomalies. Summary: {self.summary_path}")
-        else:
-            print(
-                f"net_watchdog: {len(self.anomalies)} anomalies found. "
-                f"See {self.alerts_path} and {self.summary_path}"
-                + (f" (capture: {self.pcap_path})" if self.pcap_path else "")
-            )
+        summary["_summary_path"] = str(self.summary_path)
+        print("")
+        print(format_human_report(summary))
         if self.notify and shutil.which("notify-send"):
             try:
-                subprocess.Popen(
-                    [
-                        "notify-send",
-                        "Network Watchdog run finished",
-                        f"{verdict}: {len(self.anomalies)} anomaly(ies). {self.summary_path}",
-                    ]
+                body = (
+                    "OK, no se encontro nada."
+                    if verdict == "OK"
+                    else f"Se encontraron {len(self.anomalies)} problema(s) -- ver terminal / {self.summary_path}"
                 )
+                subprocess.Popen(["notify-send", "Network Watchdog -- corrida terminada", body])
             except Exception:
                 pass
         return 0 if verdict == "OK" else 1
 
 
 def parse_args():
-    p = argparse.ArgumentParser(description=__doc__)
+    p = argparse.ArgumentParser(
+        description=__doc__,
+        epilog=QUICKSTART,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    p.add_argument(
+        "--report",
+        metavar="SUMMARY_JSON",
+        default=None,
+        help="don't run anything -- just pretty-print a previous summary_*.json and exit",
+    )
+    p.add_argument("--heartbeat", type=float, default=60.0, help="print a plain-language status line every N seconds while running (0 disables, default 60)")
     p.add_argument("--gateway", default=None, help="gateway IP to ping (default: auto-detect)")
     p.add_argument("--iface", default=None, help="primary interface (default: auto-detect)")
     p.add_argument("--wlan-iface", default=None, help="Wi-Fi interface (default: auto-detect if --iface is wireless)")
@@ -418,6 +551,14 @@ def parse_args():
 
 def main():
     args = parse_args()
+
+    if args.report:
+        with open(args.report) as f:
+            summary = json.load(f)
+        summary["_summary_path"] = args.report
+        print(format_human_report(summary))
+        sys.exit(0 if summary.get("verdict") == "OK" else 1)
+
     wd = Watchdog(args)
 
     def handle_term(signum, frame):

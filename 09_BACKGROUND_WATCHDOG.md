@@ -7,7 +7,7 @@ felt wrong. `scripts/net_watchdog.py` runs the same class of checks from `03_`, 
 sees the same signatures that took months to find manually last time.
 
 It is **read-only by default** (ping, `ss -tin`, `iw`, `/sys/class/net/*` reads) — the one
-optional exception is `--capture-on-anomaly`, covered in section 4.
+optional exception is `--capture-on-anomaly`, covered in section 5.
 
 ## 1. What it actually detects
 
@@ -23,7 +23,67 @@ Every sample is appended to a JSONL event log; every anomaly is appended to a pl
 `alerts.log` (one JSON object per line, human-readable) and, if `notify-send` is available,
 raises a desktop notification immediately — you don't have to go looking for it.
 
-## 2. Running it once, by hand
+## 2. Quick start — the 1-minute version
+
+```bash
+cd scripts/
+python3 net_watchdog.py --duration 60 --heartbeat 15
+```
+
+`--help` prints the same cheat-sheet shown below, any time. When stdout is an actual
+terminal (not piped, not a systemd log) the script prints it once at startup too, so you
+never have to go dig for "how do I run this again":
+
+```
+COMO USARLO (guia rapida)
+  Prueba corta, 1 minuto, para ver que funciona:
+    python3 net_watchdog.py --duration 60 --heartbeat 15
+
+  Corrida real, vigilando ademas retransmisiones a un host puntual:
+    python3 net_watchdog.py --duration 1200 --hosts api.anthropic.com
+
+  Ver el resultado de una corrida anterior en formato legible:
+    python3 net_watchdog.py --report ~/.local/state/net_watchdog/summary_<fecha>.json
+
+  Dejarlo instalado para que corra solo cada 3 dias: ver 09_BACKGROUND_WATCHDOG.md.
+```
+
+While it's running you get a plain-language status line every `--heartbeat` seconds (default
+60, `0` disables it) — e.g. `[15:32:50] sigue chequeando (✔ todo en orden) -- quedan ~18m30s` —
+so a foreground run never looks like it hung. The moment an anomaly fires it's printed right
+there, no need to be watching. At the end (duration elapsed, or Ctrl+C) it always prints the
+same tidy block — colored when on a real terminal, plain text when redirected/logged:
+
+```
+════════════════════════════════════════════════════════════════
+  Network Watchdog -- resumen de la corrida
+════════════════════════════════════════════════════════════════
+  Que se vigilo
+  Gateway (cortes de ping):    192.168.1.1
+  Interfaz principal:          enp5s0
+  Wi-Fi vigilada:              no aplica (enlace cableado / sin Wi-Fi detectada)
+  Hosts (retransmisiones TCP): api.anthropic.com
+  Duracion configurada:        1200s (~20 min)
+────────────────────────────────────────────────────────────────
+  ✔ OK -- no se detecto ninguna anomalia en esta corrida.
+  No hay nada que revisar ni que hacer.
+────────────────────────────────────────────────────────────────
+  Detalle completo (JSON) de esta corrida: ~/.local/state/net_watchdog/summary_20260905T153245.json
+  Para releer este mismo resumen mas tarde: --report ~/.local/state/net_watchdog/summary_20260905T153245.json
+════════════════════════════════════════════════════════════════
+```
+
+If something *was* found, that same block instead lists each anomaly with a timestamp, a
+plain-language label, and the exact message telling you which guide file/section to check
+next (see the table in section 1) — followed by a "que hacer ahora" reminder not to change
+anything blind. **You can always re-print that exact block for any past run**, without
+re-running anything:
+
+```bash
+python3 net_watchdog.py --report ~/.local/state/net_watchdog/summary_20260905T153245.json
+```
+
+## 3. Running it once, by hand (real options)
 
 ```bash
 python3 scripts/net_watchdog.py --duration 300 --hosts api.anthropic.com
@@ -32,17 +92,20 @@ python3 scripts/net_watchdog.py --duration 300 --hosts api.anthropic.com
 - `--hosts` is a comma-separated list of hostnames/IPs you actually have (or expect to have)
   live connections to — an AI API host, a work VPN endpoint, whatever this machine's
   long-lived low-latency traffic actually goes to. Without it, the ping-gap/Wi-Fi/carrier
-  checks still run, just not the retransmit tracking.
+  checks still run, just not the retransmit tracking (the startup block and every report tell
+  you plainly when this is the case, so it's never a silent gap).
 - Gateway and primary interface are auto-detected (`ip route get 8.8.8.8`); a Wi-Fi interface
   is auto-detected as wireless if `--iface` (or the auto-detected one) has
   `/sys/class/net/<iface>/wireless` or `/phy80211`.
 - Logs land in `~/.local/state/net_watchdog/` by default (`--log-dir` to change it):
   `events_<run>.jsonl` (every sample), `alerts.log` (append-only, all runs), `summary_<run>.json`
-  (verdict + full anomaly list for that run).
+  (verdict + full anomaly list for that run, and what `--report` reads back).
 - Exit code is `0` if clean, `1` if any anomaly fired — useful if you want to wire this into
   something else (a cron mail, a status check) beyond the notification.
+- `NO_COLOR=1` (or piping/redirecting output) drops the ANSI colors automatically — nothing to
+  configure for cron/systemd logs, they come out as plain text on their own.
 
-## 3. Running it on a schedule (recommended path)
+## 4. Running it on a schedule (recommended path)
 
 The point isn't to run this 24/7 — a lightweight periodic burst (e.g. 20 minutes every 3
 days) is enough to catch a chronic problem in days instead of months, without leaving
@@ -70,7 +133,7 @@ tail -f ~/.local/state/net_watchdog/alerts.log        # live-tail alerts across 
 journalctl --user -u net-watchdog.service --no-pager -n 50   # last run's console output
 ```
 
-## 4. Optional: capture-on-anomaly (the "sniffer" part)
+## 5. Optional: capture-on-anomaly (the "sniffer" part)
 
 You don't need raw packet capture for the retransmit/gap detection above — the kernel's own
 `ss -tin` counters and ping timing already give you that, no `tcpdump` required. But if you
@@ -94,7 +157,7 @@ On the first anomaly of a run, it spawns `tcpdump -i <iface> -w <path> -G <captu
 `summary_<run>.json`. Only one capture per run — it won't spam captures for every subsequent
 alert in the same window. Inspect the result with `tcpdump -r <file>` or Wireshark.
 
-## 5. Safety notes
+## 6. Safety notes
 
 - Everything except the optional capture is read-only diagnostics — same posture as the rest
   of this guide (see `02_TOOLS.md`).
