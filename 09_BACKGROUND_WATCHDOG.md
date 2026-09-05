@@ -9,6 +9,12 @@ sees the same signatures that took months to find manually last time.
 It is **read-only by default** (ping, `ss -tin`, `iw`, `/sys/class/net/*` reads) — the one
 optional exception is `--capture-on-anomaly`, covered in section 5.
 
+**Verified 2026-09-05:** three short manual runs (30s/30s/45s) against `api.anthropic.com`
+all completed clean (no false positives), with real `ss -tin` samples confirmed in the event
+log (135 samples on the 45s run) — `api.anthropic.com` is a good default `--hosts` value since
+it's the actual host Claude Code talks to. `--report` correctly re-printed a past run's summary
+without re-running anything.
+
 ## 1. What it actually detects
 
 | Check | Signature it's looking for | Same as |
