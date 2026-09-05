@@ -38,6 +38,10 @@ Wi-Fi) *before* blaming the ISP or the remote API.
    the same diagnostics from `03_`/`04_`/`05_` unattended, on a schedule, and alerts you the
    moment it sees a periodic gap, growing retransmits, or Wi-Fi degradation — so the next
    version of `06_CASE_STUDY_2026-09-05.md` gets caught in days, not months.
+10. **`10_GPN_VS_VPN_AND_MULTI_WAN.md`** — what a "Gaming Private Network" actually is
+    (route optimization, not encryption), how it differs technically from a VPN, and whether
+    it's worth anything if you already have two WAN links (route optimization vs. real
+    bonding/multipath).
 
 ## Golden rule
 
