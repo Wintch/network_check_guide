@@ -23,11 +23,22 @@ Every sample is appended to a JSONL event log; every anomaly is appended to a pl
 `alerts.log` (one JSON object per line, human-readable) and, if `notify-send` is available,
 raises a desktop notification immediately — you don't have to go looking for it.
 
-## 2. Quick start — the 1-minute version
+## 2. Quick start — pase rápido vs. chequeo completo
+
+The default (`--duration`, 300s = 5 min) is the **quick pass** — enough to catch a short-period
+issue (the case study's was ~35s) without tying up a terminal. Reach for a longer `--duration`
+(1200s = 20 min, or more) when you actually suspect something and want a **thorough/deep
+check** — more samples, more chances to catch something slower or rarer, and worth pairing
+with `--capture-on-anomaly` for that one run:
 
 ```bash
 cd scripts/
-python3 net_watchdog.py --duration 60 --heartbeat 15
+
+# pase rapido (default, 5 min) -- lo que corre el timer cada 3 dias
+python3 net_watchdog.py --hosts api.anthropic.com
+
+# chequeo completo/profundo -- cuando algo se siente raro y queres mirar en detalle
+python3 net_watchdog.py --duration 1200 --hosts api.anthropic.com --capture-on-anomaly
 ```
 
 `--help` prints the same cheat-sheet shown below, any time. When stdout is an actual
@@ -36,11 +47,11 @@ never have to go dig for "how do I run this again":
 
 ```
 COMO USARLO (guia rapida)
-  Prueba corta, 1 minuto, para ver que funciona:
-    python3 net_watchdog.py --duration 60 --heartbeat 15
+  Pase rapido (default, 5 min), vigilando retransmisiones a la API real:
+    python3 net_watchdog.py --hosts api.anthropic.com
 
-  Corrida real, vigilando ademas retransmisiones a un host puntual:
-    python3 net_watchdog.py --duration 1200 --hosts api.anthropic.com
+  Chequeo completo/profundo (mas tiempo para agarrar patrones lentos):
+    python3 net_watchdog.py --duration 1200 --hosts api.anthropic.com --capture-on-anomaly
 
   Ver el resultado de una corrida anterior en formato legible:
     python3 net_watchdog.py --report ~/.local/state/net_watchdog/summary_<fecha>.json
@@ -63,7 +74,7 @@ same tidy block — colored when on a real terminal, plain text when redirected/
   Interfaz principal:          enp5s0
   Wi-Fi vigilada:              no aplica (enlace cableado / sin Wi-Fi detectada)
   Hosts (retransmisiones TCP): api.anthropic.com
-  Duracion configurada:        1200s (~20 min)
+  Duracion configurada:        300s (~5 min)
 ────────────────────────────────────────────────────────────────
   ✔ OK -- no se detecto ninguna anomalia en esta corrida.
   No hay nada que revisar ni que hacer.
@@ -107,8 +118,8 @@ python3 scripts/net_watchdog.py --duration 300 --hosts api.anthropic.com
 
 ## 4. Running it on a schedule (recommended path)
 
-The point isn't to run this 24/7 — a lightweight periodic burst (e.g. 20 minutes every 3
-days) is enough to catch a chronic problem in days instead of months, without leaving
+The point isn't to run this 24/7 — a lightweight periodic burst (the 5-minute default, every
+3 days) is enough to catch a chronic problem in days instead of months, without leaving
 anything running all the time. Install the provided user-level systemd timer:
 
 ```bash

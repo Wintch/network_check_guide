@@ -53,11 +53,11 @@ def c(text, *styles):
 
 QUICKSTART = """\
 COMO USARLO (guia rapida)
-  Prueba corta, 1 minuto, para ver que funciona:
-    python3 net_watchdog.py --duration 60 --heartbeat 15
+  Pase rapido (default, 5 min), vigilando retransmisiones a la API real:
+    python3 net_watchdog.py --hosts api.anthropic.com
 
-  Corrida real, vigilando ademas retransmisiones a un host puntual:
-    python3 net_watchdog.py --duration 1200 --hosts api.anthropic.com
+  Chequeo completo/profundo (mas tiempo para agarrar patrones lentos):
+    python3 net_watchdog.py --duration 1200 --hosts api.anthropic.com --capture-on-anomaly
 
   Ver el resultado de una corrida anterior en formato legible:
     python3 net_watchdog.py --report ~/.local/state/net_watchdog/summary_<fecha>.json
@@ -536,7 +536,7 @@ def parse_args():
     p.add_argument("--iface", default=None, help="primary interface (default: auto-detect)")
     p.add_argument("--wlan-iface", default=None, help="Wi-Fi interface (default: auto-detect if --iface is wireless)")
     p.add_argument("--hosts", default="", help="comma-separated hostnames/IPs to track with ss -tin (e.g. api.anthropic.com)")
-    p.add_argument("--duration", type=int, default=1200, help="how long to run, seconds (default 1200 = 20 min)")
+    p.add_argument("--duration", type=int, default=300, help="how long to run, seconds (default 300 = 5 min; use a longer value like 1200 for a deeper/thorough check)")
     p.add_argument("--interval", type=float, default=5.0, help="sample interval for ss/wifi/carrier checks, seconds")
     p.add_argument("--ping-gap-threshold", type=float, default=1.5, help="gateway ping gap, seconds, to flag as anomaly")
     p.add_argument("--wifi-signal-threshold", type=int, default=-70, help="dBm below which to flag Wi-Fi signal")

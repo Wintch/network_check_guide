@@ -10,7 +10,7 @@ Type=oneshot
 # Add --capture-on-anomaly only after granting tcpdump capture permissions,
 # see 09_BACKGROUND_WATCHDOG.md.
 ExecStart=/usr/bin/python3 %h/Documents/network_check_guide/scripts/net_watchdog.py \
-    --duration 1200 \
+    --duration 300 \
     --hosts api.anthropic.com
 Nice=10
 IOSchedulingClass=idle
