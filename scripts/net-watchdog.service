@@ -1,0 +1,16 @@
+[Unit]
+Description=Network health watchdog (bounded diagnostic run)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# Adjust --hosts to whatever long-lived service you actually care about
+# (an AI API host, a work VPN endpoint, etc.) -- see 05_AI_WORKLOAD_AND_LATENCY.md.
+# Add --capture-on-anomaly only after granting tcpdump capture permissions,
+# see 09_BACKGROUND_WATCHDOG.md.
+ExecStart=/usr/bin/python3 %h/Documents/network_check_guide/scripts/net_watchdog.py \
+    --duration 1200 \
+    --hosts api.anthropic.com
+Nice=10
+IOSchedulingClass=idle

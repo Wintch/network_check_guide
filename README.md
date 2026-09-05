@@ -27,6 +27,17 @@ Wi-Fi) *before* blaming the ISP or the remote API.
 6. **`06_CASE_STUDY_2026-09-05.md`** — the real incident, worked end to end, with the exact
    commands and numbers that found and confirmed the root cause. Use it as a template for
    the next weird one.
+7. **`07_GAME_AND_VR_STREAMING.md`** — bandwidth/latency requirements and diagnostics for
+   Parsec, Moonlight/Sunshine, Xbox Cloud Gaming, Boosteroid, and wireless VR streaming
+   (Air Link, Virtual Desktop, ALVR, WiVRn) — what each service auto-adapts vs. what you
+   have to set yourself, and what a network problem looks like in each one's own UI.
+8. **`08_QOS_TRAFFIC_SHAPING_AND_5GHZ.md`** — bufferbloat testing, `cake`/`fq_codel` traffic
+   shaping, DSCP marking to prioritize streaming traffic on a shared link, and 5GHz/6GHz
+   Wi-Fi tuning beyond just "connect to the 5GHz SSID."
+9. **`09_BACKGROUND_WATCHDOG.md`** — a Python script (`scripts/net_watchdog.py`) that runs
+   the same diagnostics from `03_`/`04_`/`05_` unattended, on a schedule, and alerts you the
+   moment it sees a periodic gap, growing retransmits, or Wi-Fi degradation — so the next
+   version of `06_CASE_STUDY_2026-09-05.md` gets caught in days, not months.
 
 ## Golden rule
 
