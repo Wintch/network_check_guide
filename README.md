@@ -42,6 +42,11 @@ Wi-Fi) *before* blaming the ISP or the remote API.
     (route optimization, not encryption), how it differs technically from a VPN, and whether
     it's worth anything if you already have two WAN links (route optimization vs. real
     bonding/multipath).
+11. **`11_SSH_MULTIPLEXING_AND_MOSH.md`** — two different latency fixes for two different
+    callers: SSH `ControlMaster`/`ControlPersist` for a script issuing many one-shot commands
+    (measured ~17x faster on repeat calls), and Mosh for a human typing in one interactive
+    session (instant local echo, survives IP changes/drops). Which one to reach for depends
+    entirely on who's connecting, not which is "better."
 
 ## Golden rule
 
