@@ -47,6 +47,12 @@ Wi-Fi) *before* blaming the ISP or the remote API.
     (measured ~17x faster on repeat calls), and Mosh for a human typing in one interactive
     session (instant local echo, survives IP changes/drops). Which one to reach for depends
     entirely on who's connecting, not which is "better."
+12. **`12_SECURITY_AND_PARASITIC_TRAFFIC.md`** — the other kind of "network problem": ad-tech/
+    ACR telemetry riding along inside smart-TV and streaming apps (seeded from a real captured
+    LG Channels endpoint list), unknown/new devices joining the LAN, duplicate MACs, and the
+    generic "sustained high-bandwidth stream to an unnamed peer" signature that catches both a
+    piracy set-top box and a malware C2 channel. Adds `--mode telemetry`/`malware`/`all` to
+    `scripts/net_watchdog.py`, verified live against a real 29-host LAN.
 
 ## Golden rule
 

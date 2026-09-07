@@ -29,7 +29,12 @@ Every sample is appended to a JSONL event log; every anomaly is appended to a pl
 `alerts.log` (one JSON object per line, human-readable) and, if `notify-send` is available,
 raises a desktop notification immediately — you don't have to go looking for it.
 
-## 2. Quick start — pase rápido vs. chequeo completo
+This table is the `--mode stability` (default) checks. The script also has `--mode telemetry`
+(ad-tech/ACR domain matching) and `--mode malware` (LAN device inventory, suspicious ports,
+unidentified high-bandwidth streams) — see `12_SECURITY_AND_PARASITIC_TRAFFIC.md` for those;
+`--mode all` runs everything in this file plus both of those together.
+
+## 2. Quick start — quick pass vs. full check
 
 The default (`--duration`, 300s = 5 min) is the **quick pass** — enough to catch a short-period
 issue (the case study's was ~35s) without tying up a terminal. Reach for a longer `--duration`
@@ -40,10 +45,10 @@ with `--capture-on-anomaly` for that one run:
 ```bash
 cd scripts/
 
-# pase rapido (default, 5 min) -- lo que corre el timer cada 3 dias
+# quick pass (default, 5 min) -- what the timer runs every 3 days
 python3 net_watchdog.py --hosts api.anthropic.com
 
-# chequeo completo/profundo -- cuando algo se siente raro y queres mirar en detalle
+# full/deep check -- when something feels off and you want to look closer
 python3 net_watchdog.py --duration 1200 --hosts api.anthropic.com --capture-on-anomaly
 ```
 
@@ -52,47 +57,47 @@ terminal (not piped, not a systemd log) the script prints it once at startup too
 never have to go dig for "how do I run this again":
 
 ```
-COMO USARLO (guia rapida)
-  Pase rapido (default, 5 min), vigilando retransmisiones a la API real:
+HOW TO USE IT (quick guide)
+  Quick pass (default, 5 min), watching retransmits to the real API:
     python3 net_watchdog.py --hosts api.anthropic.com
 
-  Chequeo completo/profundo (mas tiempo para agarrar patrones lentos):
+  Full/deep check (more time to catch slow patterns):
     python3 net_watchdog.py --duration 1200 --hosts api.anthropic.com --capture-on-anomaly
 
-  Ver el resultado de una corrida anterior en formato legible:
-    python3 net_watchdog.py --report ~/.local/state/net_watchdog/summary_<fecha>.json
+  Re-print a past run's result in readable form:
+    python3 net_watchdog.py --report ~/.local/state/net_watchdog/summary_<date>.json
 
-  Dejarlo instalado para que corra solo cada 3 dias: ver 09_BACKGROUND_WATCHDOG.md.
+  Install it to run on its own every 3 days: see 09_BACKGROUND_WATCHDOG.md.
 ```
 
 While it's running you get a plain-language status line every `--heartbeat` seconds (default
-60, `0` disables it) — e.g. `[15:32:50] sigue chequeando (✔ todo en orden) -- quedan ~18m30s` —
+60, `0` disables it) — e.g. `[15:32:50] still checking (✔ all clear) -- ~18m30s left` —
 so a foreground run never looks like it hung. The moment an anomaly fires it's printed right
 there, no need to be watching. At the end (duration elapsed, or Ctrl+C) it always prints the
 same tidy block — colored when on a real terminal, plain text when redirected/logged:
 
 ```
 ════════════════════════════════════════════════════════════════
-  Network Watchdog -- resumen de la corrida
+  Network Watchdog -- run summary
 ════════════════════════════════════════════════════════════════
-  Que se vigilo
-  Gateway (cortes de ping):    192.168.1.1
-  Interfaz principal:          enp5s0
-  Wi-Fi vigilada:              no aplica (enlace cableado / sin Wi-Fi detectada)
-  Hosts (retransmisiones TCP): api.anthropic.com
-  Duracion configurada:        300s (~5 min)
+  What was watched (mode: stability)
+  Gateway (ping gaps):         192.168.1.1
+  Primary interface:           enp5s0
+  Wi-Fi monitored:             not applicable (wired link / no Wi-Fi detected)
+  Hosts (TCP retransmits):     api.anthropic.com
+  Configured duration:         300s (~5 min)
 ────────────────────────────────────────────────────────────────
-  ✔ OK -- no se detecto ninguna anomalia en esta corrida.
-  No hay nada que revisar ni que hacer.
+  ✔ OK -- no anomaly detected on this run.
+  Nothing to review, nothing to do.
 ────────────────────────────────────────────────────────────────
-  Detalle completo (JSON) de esta corrida: ~/.local/state/net_watchdog/summary_20260905T153245.json
-  Para releer este mismo resumen mas tarde: --report ~/.local/state/net_watchdog/summary_20260905T153245.json
+  Full detail (JSON) for this run: ~/.local/state/net_watchdog/summary_20260905T153245.json
+  To re-read this same summary later: --report ~/.local/state/net_watchdog/summary_20260905T153245.json
 ════════════════════════════════════════════════════════════════
 ```
 
 If something *was* found, that same block instead lists each anomaly with a timestamp, a
 plain-language label, and the exact message telling you which guide file/section to check
-next (see the table in section 1) — followed by a "que hacer ahora" reminder not to change
+next (see the table in section 1) — followed by a "what to do now" reminder not to change
 anything blind. **You can always re-print that exact block for any past run**, without
 re-running anything:
 
