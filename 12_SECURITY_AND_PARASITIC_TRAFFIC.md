@@ -119,6 +119,30 @@ blocklist. So instead of trying to name the bad thing, the check looks at **shap
 - **Optional real domain feed.** `--malware-domains-file` lets you point at a blocklist you
   trust (e.g. an export from abuse.ch/URLhaus). Nothing is bundled by default — a stale or
   fabricated "malware domains" list would be actively misleading, worse than not having one.
+  `scripts/malware_domains.example.txt` documents the exact `curl`/`awk` one-liner to pull and
+  format a live URLhaus export yourself.
+
+### Example domain-list files
+
+Two ready-to-use files ship in `scripts/` for the two `--*-domains-file` flags:
+
+- `scripts/telemetry_domains.example.txt` — repeats the LG-verified list from §1 (clearly
+  labeled as the one set here that was actually captured firsthand), then extends it with
+  other publicly-documented vendors: Vizio's Inscape, Samsung's ACR, Roku, Nielsen, Amazon Fire
+  TV's device-metrics pipeline, and Microsoft's Windows diagnostic-data ("Connected User
+  Experiences and Telemetry") endpoints. Everything past the LG section is sourced from public
+  writeups/Microsoft's own docs, not captured on this guide's own network — verify against your
+  own traffic before assuming a specific device uses exactly these hosts, and for Windows in
+  particular, check Microsoft's own current list (search their "Manage connections from Windows
+  operating system components to Microsoft services" doc) since it varies by Windows version.
+- `scripts/malware_domains.example.txt` — intentionally contains **no domains**, only the
+  command to pull a real, current feed (abuse.ch/URLhaus) and point `--malware-domains-file`
+  at it. Re-run that command whenever you want to refresh it; nothing here is fetched
+  automatically.
+
+```bash
+python3 net_watchdog.py --mode telemetry --telemetry-domains-file scripts/telemetry_domains.example.txt
+```
 
 ## 3. What this can't do (read this before trusting a clean run)
 
