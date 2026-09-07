@@ -902,7 +902,12 @@ class Watchdog:
             print(f"  Telemetry domains:            {len(self.telemetry_domains)} (built-in + --telemetry-domains-file)")
         if self.mode in ("malware", "all"):
             print(f"  LAN inventory:                {self.lan_cidr or c('(could not determine the CIDR -- pass --lan-cidr)', 'yellow')}")
-            print(f"  Malware domains:              {len(self.malware_domains) or c('none -- pass --malware-domains-file to add a feed', 'yellow')}")
+            if self.malware_domains:
+                print(f"  Malware domains:              {len(self.malware_domains)} loaded from {self.args.malware_domains_file}")
+            elif self.args.malware_domains_file:
+                print(f"  Malware domains:              {c('0 loaded from ' + self.args.malware_domains_file + ' (file has no active domain lines -- only comments?)', 'yellow')}")
+            else:
+                print(f"  Malware domains:              {c('none -- pass --malware-domains-file to add a feed', 'yellow')}")
         print(f"  Duration:                     {self.args.duration}s (~{self.args.duration // 60} min)")
         print(f"  Logs / alerts in:             {self.log_dir}")
         print("Running... (Ctrl+C stops early and still writes the summary. An alert")
