@@ -5,7 +5,7 @@ Runs all essential checks from 01_QUICK_CHECKLIST.md, 03_WIRED_AND_GATEWAY.md,
 and 05_AI_WORKLOAD_AND_LATENCY.md in a single safe, non-destructive pass:
   1. Primary interface link health (speed, duplex, carrier flaps, Wi-Fi stats)
   2. Gateway reachability & high-resolution periodic gap detection (ping -D)
-  3. DNS resolution latency & stability (local vs remote resolver)
+  3. DNS resolution latency & stability (local vs remote resolver, local cache detection)
   4. Path MTU & ICMP PMTUD black-hole check (detects 1500 vs 1492/PPPoE vs VPN)
   5. Dual-stack IPv4/IPv6 sanity & public IP detection
   6. Real HTTP/TLS handshake timing to target API (DNS, TCP, TLS, TTFB)
@@ -306,6 +306,62 @@ def check_gateway_pings(gateway_ip: str, count: int = 25) -> dict:
     return result
 
 
+def check_local_dns_cache(target_host: str, cold_ms: float | None) -> dict:
+    """Detect whether a local caching resolver is in front of us.
+
+    Two independent signals:
+      1. /etc/resolv.conf pointing at a loopback address (127.0.0.1, 127.0.0.53, ::1)
+         strongly suggests a local stub/cache (systemd-resolved, dnsmasq, unbound).
+      2. Re-resolving the same target right after the cold lookup: a real cache
+         collapses this to ~0ms; with no cache it stays close to the cold-lookup time.
+    """
+    result = {
+        "nameserver": None,
+        "loopback_nameserver": False,
+        "warm_ms": None,
+        "cache_detected": False,
+        "warnings": [],
+    }
+
+    try:
+        with open("/etc/resolv.conf", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith("nameserver"):
+                    ns = line.split()[1]
+                    result["nameserver"] = ns
+                    if ns.startswith("127.") or ns == "::1":
+                        result["loopback_nameserver"] = True
+                    break
+    except OSError:
+        pass
+
+    t0 = time.perf_counter()
+    try:
+        socket.getaddrinfo(target_host, 443, proto=socket.IPPROTO_TCP)
+        result["warm_ms"] = round((time.perf_counter() - t0) * 1000.0, 1)
+    except Exception:
+        pass
+
+    # A cache hit should be near-instant regardless of what the cold lookup cost.
+    if result["warm_ms"] is not None and result["warm_ms"] < 2.0:
+        result["cache_detected"] = True
+    elif result["loopback_nameserver"]:
+        # Loopback resolver but warm lookup wasn't fast — trust the signal anyway,
+        # some setups (e.g. validating resolvers) add a few ms even on cache hits.
+        result["cache_detected"] = True
+
+    if not result["cache_detected"] and cold_ms is not None and cold_ms > 15.0:
+        result["warnings"].append(
+            f"No local DNS cache detected (nameserver={result['nameserver']!r}, "
+            f"repeat lookup still took {result['warm_ms']}ms) — every lookup, even "
+            "repeats, pays full resolver round-trip latency. See "
+            "01_QUICK_CHECKLIST.md section 7 to set up dnsmasq or dnscrypt-proxy (encrypted)."
+        )
+
+    return result
+
+
 def check_dns_health(target_host: str) -> dict:
     """Measure DNS resolution speed and stability across multiple domains."""
     domains = [
@@ -317,6 +373,7 @@ def check_dns_health(target_host: str) -> dict:
         "target_host": target_host,
         "resolutions": {},
         "target_ms": None,
+        "cache": None,
         "issues": [],
         "warnings": [],
     }
@@ -341,6 +398,9 @@ def check_dns_health(target_host: str) -> dict:
             result["warnings"].append(
                 f"Slow DNS resolution for {target_host}: {result['target_ms']}ms (adds perceptible delay to new API sessions)"
             )
+
+    result["cache"] = check_local_dns_cache(target_host, result["target_ms"])
+    result["warnings"].extend(result["cache"]["warnings"])
 
     return result
 
@@ -634,6 +694,12 @@ def main():
         print(f"  {badge('WARN')} DNS lookup for {args.host} slow: {dns_report['target_ms']}ms")
     else:
         print(f"  {badge('FAIL')} DNS resolution failed")
+
+    cache = dns_report.get("cache") or {}
+    if cache.get("cache_detected"):
+        print(f"  {badge('OK')} Local DNS cache active (nameserver={cache.get('nameserver')}, repeat lookup={cache.get('warm_ms')}ms)")
+    elif cache.get("nameserver") is not None:
+        print(f"  {badge('WARN')} No local DNS cache (nameserver={cache.get('nameserver')}, repeat lookup={cache.get('warm_ms')}ms) — see 01_QUICK_CHECKLIST.md section 7")
 
     print("\n" + c("4. Path MTU & Black Hole Check", "bold"))
     if mtu_report.get("is_standard_1500"):

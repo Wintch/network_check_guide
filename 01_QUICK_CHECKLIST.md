@@ -12,8 +12,9 @@ non-destructive — read-only checks, nothing that touches routing or config.
 > python3 scripts/quick_check.py --full
 > ```
 > It automates steps 1 through 5 below — link health, gateway gaps, Path MTU (1500 vs 1492
-> PPPoE), and DNS latency — and presents a colorized verdict with recommendations. Step 6
-> (which DNS resolver to use) is a one-time decision, not something to re-check every session.
+> PPPoE), DNS latency, and whether a local DNS cache is active — and presents a colorized
+> verdict with recommendations. Steps 6-7 (which resolver to use, setting up a local cache)
+> are one-time decisions, not something to re-check every session.
 
 ---
 
@@ -116,6 +117,131 @@ for r in 1.1.1.1 8.8.8.8 9.9.9.9; do
   echo -n "$r: "; dig @$r api.anthropic.com +tries=1 +time=2 | grep "Query time"
 done
 ```
+
+Note: even the "fast" public resolvers show real jitter (Google's huge anycast fleet in
+particular can sometimes route your query to a farther backend than the ICMP-responding edge
+node, so `ping 8.8.8.8` looking fast doesn't guarantee consistent DNS latency). Benchmark with
+`dig`, not `ping`.
+
+## 7. Local DNS cache: most systems don't have one by default
+
+Without a local caching resolver, **every single lookup** — even repeats of the same domain
+seconds apart — pays full round-trip latency to whichever upstream resolver you picked in
+step 6. Check whether you have one:
+
+```bash
+cat /etc/resolv.conf   # nameserver 127.0.0.1 or 127.0.0.53 usually means a local cache exists
+resolvectl status 2>/dev/null || echo "no systemd-resolved"
+ps aux | grep -E "dnsmasq|unbound|nscd" | grep -v grep
+```
+
+If `nameserver` points straight at a public IP (e.g. `9.9.9.9`), there's no cache — plain
+NetworkManager-managed setups (`dns=default`) are like this out of the box.
+
+**Recommended: dnsmasq via NetworkManager's built-in plugin**, not systemd-resolved or
+unbound, for most desktop/laptop Linux setups:
+
+| Option | Why (not) |
+|---|---|
+| **dnsmasq (`dns=dnsmasq` in NetworkManager)** | Usually already available (`dnsmasq-base` package) or a one-package install; NetworkManager spawns/manages it, auto-derives upstream servers from your connection's DNS setting, survives network switches/VPN. Minimal footprint, trivial to revert. |
+| systemd-resolved | Fine if your distro already runs it by default (many do — check first: `resolvectl status`). If it isn't installed, adding it means a new package plus re-pointing `/etc/resolv.conf` at its stub — more moving parts for the same caching benefit. |
+| unbound | A full validating recursive resolver — worth it if you want to stop depending on a third-party resolver entirely, but overkill if the goal is just "cache what Quad9/Cloudflare already gave me." |
+
+Setup (Debian/Ubuntu with NetworkManager, assuming `dnsmasq-base` is present):
+
+```bash
+sudo nmcli connection modify "<your connection name>" ipv4.dns "9.9.9.9"   # make sure NM's own record matches what you actually want
+sudo mkdir -p /etc/NetworkManager/conf.d
+sudo tee /etc/NetworkManager/conf.d/dns-dnsmasq.conf > /dev/null <<'EOF'
+[main]
+dns=dnsmasq
+EOF
+sudo systemctl restart NetworkManager   # brief (1-2s) network blip while it reloads
+```
+
+Verify: `cat /etc/resolv.conf` should now show `nameserver 127.0.0.1`. Confirm the cache is
+actually working by resolving the same domain twice back to back — the second call should
+drop to sub-millisecond:
+
+```bash
+dig api.anthropic.com | grep "Query time"   # first: real upstream latency
+dig api.anthropic.com | grep "Query time"   # second: ~0 msec, served from local cache
+```
+
+To revert: delete `/etc/NetworkManager/conf.d/dns-dnsmasq.conf` and restart NetworkManager.
+
+`scripts/quick_check.py` detects and warns about a missing local cache automatically (see
+below).
+
+### Plaintext vs encrypted DNS (DoT/DoH)
+
+Neither the router's DHCP-provided resolver nor a plain `dig @9.9.9.9`/dnsmasq setup is
+encrypted by default — both are ordinary UDP/53, readable by anything on the path (your ISP
+included). Going "direct to an external resolver" only buys you a better privacy *policy*
+(Quad9 doesn't tie queries to your ISP account or sell ad data); it does **not** buy
+encryption by itself. For actual encryption you need DoT (port 853) or DoH (port 443), which
+Quad9 supports.
+
+**What didn't work: `systemd-resolved` with `DNSOverTLS=yes`.** Tried first since it needs no
+extra proxy — config was `DNS=9.9.9.9#dns.quad9.net` in
+`/etc/systemd/resolved.conf.d/`. Result on Debian 13 (systemd 257): broken out of the box.
+`systemd-resolved`'s D-Bus interface (`org.freedesktop.resolve1`) failed to activate
+(`resolvectl status` timed out), which also silently broke NetworkManager's ability to push
+the per-link DNS server to it — the resolver ended up with zero configured upstream servers
+and `REFUSED` every query. Installing the package also rewrites `/etc/resolv.conf` into a
+symlink pointing at its stub; disabling the service alone leaves that symlink dangling and DNS
+fully dead until you `apt purge systemd-resolved` and let NetworkManager regenerate
+`resolv.conf`. If your distro already runs `systemd-resolved` by default and it *works*
+(check with `resolvectl status` before touching anything), just add `DNSOverTLS=yes` there —
+this failure mode is specific to bolting it on where it wasn't already running.
+
+**What works: `dnscrypt-proxy` pointed at Quad9's DoH endpoint.** Available directly via
+`apt install dnscrypt-proxy` (no third-party repo, unlike `cloudflared` which isn't packaged
+for Debian and defaults to Cloudflare's own resolver anyway). Debian's package listens on
+`127.0.2.1:53` by default (deliberately not `127.0.0.1`, to avoid clashing with any other
+local resolver) via systemd socket activation.
+
+```bash
+sudo apt-get install -y dnscrypt-proxy
+sudo sed -i "s/^server_names = .*/server_names = ['quad9-doh-ip4-port443-filter-pri']/" \
+  /etc/dnscrypt-proxy/dnscrypt-proxy.toml
+sudo systemctl restart dnscrypt-proxy.socket dnscrypt-proxy.service
+dig @127.0.2.1 api.anthropic.com   # sanity check before touching system DNS
+```
+
+`quad9-doh-ip4-port443-filter-pri` is Quad9's standard filtered/secure resolver (the `9.9.9.9`
+one) speaking DoH — found via `grep -i "^## quad9" -A3 /var/cache/dnscrypt-proxy/public-resolvers.md`
+after first install/start (it fetches and caches that list itself). Confirm it actually picked
+Quad9 (not the package's `cloudflare` default) via
+`journalctl -u dnscrypt-proxy | grep -i quad9`, and confirm the traffic is genuinely encrypted
+by checking the live connection instead of trusting logs alone:
+
+```bash
+dig @127.0.2.1 <a-fresh-never-queried-domain>
+ss -tn | grep -E '9\.9\.9\.9|149\.112\.112\.9'   # should show an ESTAB connection on :443
+```
+
+Then point the system at it — set it as the connection's DNS server directly:
+
+```bash
+sudo nmcli connection modify "<your connection name>" ipv4.dns "127.0.2.1"
+sudo systemctl restart NetworkManager
+cat /etc/resolv.conf   # should show nameserver 127.0.2.1
+```
+
+**Don't also chain this through `dnsmasq`.** The instinct is apps → dnsmasq (cache) →
+dnscrypt-proxy (encrypt) → Quad9, keeping the dnsmasq caching layer from section 6 in front of
+the new encrypted upstream. It doesn't work: NetworkManager's `dns=dnsmasq` plugin pushes
+per-connection DNS servers to dnsmasq over D-Bus tagged with the physical interface (you'll
+see `using nameserver 127.0.2.1#53(via enp5s0)` in the logs) — correct for a real remote
+resolver reached through that link, but loopback traffic routed "via" a physical interface
+gets silently dropped, so dnsmasq hangs on every query while `dig @127.0.2.1` directly still
+works fine. `dnscrypt-proxy` already caches internally (confirmed: repeat lookups drop to
+<1ms), so there's no caching benefit lost by skipping dnsmasq — just point `ipv4.dns` straight
+at `127.0.2.1` and leave dnsmasq out of it entirely.
+
+`scripts/quick_check.py`'s cache detection (section 7) works unchanged here — it flags any
+loopback nameserver (`127.x.x.x`) as a local cache, not just `127.0.0.1`.
 
 ## When something looks wrong
 
