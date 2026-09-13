@@ -118,6 +118,70 @@ recurring source of exactly this kind of periodic failure. Specifically:
 - Long-term fix for chronic cases: swap the adapter for one using the Realtek `r8152`
   driver, which has been far more stable in practice on this kind of setup.
 
+## 6. Path MTU, PPPoE (1492), and PMTUD Black Holes
+
+A classic failure signature: **`ping` to 8.8.8.8 works fine with 0% loss, but `git push`, large API responses, or SSH file transfers freeze indefinitely.**
+
+Why this happens:
+- Standard Ethernet MTU is **1500 bytes**.
+- Residential fiber / DSL connections using **PPPoE** encapsulate 8 bytes of PPP headers, leaving an MTU of **1492 bytes**.
+- VPNs (WireGuard, IPsec) reduce MTU further (often **1420** or **1392**).
+- If your OS tries to send a 1500-byte packet with the DF (Don't Fragment) flag set, intermediate routers must reply with an ICMP Type 3 Code 4 (*"Fragmentation Needed"*).
+- If an upstream firewall or ISP router drops these ICMP messages, you hit a **PMTUD Black Hole**: your machine keeps retransmitting the oversized packet, waiting for an ACK that never comes, while small packets (like pings or TCP ACKs) pass effortlessly.
+
+### How to test:
+```bash
+# Test standard 1500 MTU (1472 payload + 28 bytes IP/ICMP headers = 1500)
+ping -M do -s 1472 -c 2 -W 2 8.8.8.8
+
+# If that fails or gives "Frag needed (mtu=1492)", test PPPoE 1492 MTU (1464 payload + 28 = 1492):
+ping -M do -s 1464 -c 2 -W 2 8.8.8.8
+
+# If on a VPN / tunnel, test 1420 MTU (1392 payload + 28 = 1420):
+ping -M do -s 1392 -c 2 -W 2 8.8.8.8
+```
+
+Read the error carefully — it tells you *where* the packet died:
+- **`ping: sendmsg: Message too long`** — the kernel refused to send it at all. Your local
+  interface already has a smaller MTU configured (normal and expected on a PPPoE/VPN
+  interface). This is not a black hole, it's just confirming the local MTU.
+- **`Frag needed and DF set` / an explicit ICMP reply** — a router along the path told you
+  the real limit. Also not a black hole — PMTUD is working correctly.
+- **100% packet loss with no error and no ICMP reply at all** — the oversized packet left
+  your machine and nothing came back. *This* is the actual PMTUD black hole signature.
+
+### The fix:
+- On your local machine: set MTU explicitly if using PPPoE/VPN:
+  `sudo ip link set dev <iface> mtu 1492`
+- On the router/firewall: ensure **TCP MSS Clamping** is enabled on the WAN interface. In `nftables`:
+  `nft add rule inet filter forward tcp flags syn tcp option maxseg size set rt mtu`
+  Or in `iptables`:
+  `iptables -t mangle -A FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu`
+
+## 7. NIC Hardware Quirks: Energy Efficient Ethernet (EEE) & Offloading
+
+Modern NICs (especially Realtek `r8169`/`r8125` and Intel `e1000e`/`igc`) include power-saving and hardware offloading features that can induce micro-stutters:
+
+1. **EEE (Energy Efficient Ethernet / 802.3az):**
+   Puts the PHY into low-power mode during brief link idle periods. Waking up takes microseconds to milliseconds, causing jitter spikes or dropped frames under sudden burst traffic.
+   ```bash
+   # Check if EEE is active:
+   ethtool --show-eee <iface>
+
+   # Disable EEE:
+   sudo ethtool --set-eee <iface> eee off
+   ```
+
+2. **Hardware Offloading (TSO / GSO / GRO):**
+   TCP Segmentation Offload allows the kernel to pass 64KB buffers to the NIC to segment into MTU-sized packets. On buggy drivers or USB dongles, this can cause silent frame drops or stalls.
+   ```bash
+   # Check active offload features:
+   ethtool -k <iface> | grep -E "segmentation|generic-receive"
+
+   # Test disabling TSO and GSO to rule out driver offload bugs:
+   sudo ethtool -K <iface> tso off gso off
+   ```
+
 ## Safety note
 
 Never disable/change a watchdog, reset a NIC, or touch routing on a shared/production router

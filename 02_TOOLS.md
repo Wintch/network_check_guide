@@ -6,12 +6,13 @@ basics — the table below flags what's usually missing.
 
 | Tool | Purpose | Package (Debian/Ubuntu) | Usually pre-installed? |
 |---|---|---|---|
-| `ping` | Latency + loss to one host, with timestamps (`-D`) | `iputils-ping` | Yes |
-| `ip` (`ip route`, `ip -br link`, `ip neigh`) | Routes, interface state, ARP/neighbor table | `iproute2` | Yes |
+| `ping` | Latency + loss to one host, timestamps (`-D`), MTU probes (`-M do -s`) | `iputils-ping` | Yes |
+| `ip` (`ip route`, `ip -br link`, `ip neigh`) | Routes (v4/v6), interface state, ARP/neighbor table | `iproute2` | Yes |
 | `ss` | Live TCP/UDP socket + kernel-measured RTT/retransmit stats (`ss -tin`) | `iproute2` | Yes |
 | `curl -w` | Per-phase HTTP timing (DNS/connect/TLS/TTFB/total) | `curl` | Yes |
+| `resolvectl` / `dig` | DNS resolver stats, query latency, and upstream server verification | `systemd` / `dnsutils` | Yes (`resolvectl`), `dig` optional |
 | `mtr` | Combined traceroute + ping, per-hop loss/latency over time | `mtr-tiny` or `mtr` | **Often missing**, install it |
-| `ethtool` | NIC negotiated speed/duplex, driver info, ring/queue stats | `ethtool` | **Often missing**, install it |
+| `ethtool` | NIC speed/duplex, EEE (802.3az) state, offload flags (TSO/GSO) | `ethtool` | **Often missing**, install it |
 | `dmesg` | Kernel log — link up/down, USB re-enumeration, driver errors | built-in | Yes (may need root) |
 | `iperf3` | Real sustained-throughput test, client/server | `iperf3` | **Often missing**, install it |
 | `tcpdump` | Packet capture — last resort, use when stats alone don't explain it | `tcpdump` | **Often missing**, install it |
@@ -20,6 +21,7 @@ basics — the table below flags what's usually missing.
 | `/proc/net/wireless` | Quick per-interface Wi-Fi quality snapshot, no tool needed | n/a (kernel file) | Always present if a Wi-Fi driver is loaded |
 | `systemctl list-timers` | Reveals scheduled jobs (cron/systemd timers) that might be touching the network | built-in (systemd) | Yes |
 | `journalctl -u <service>` | History of what a specific watchdog/service actually did and when | built-in (systemd) | Yes |
+| `quick_check.py` | 1-command automated pre-work sanity check in ~20-40s | `scripts/quick_check.py` | Built-in script (Python stdlib) |
 
 ## One-shot install (Debian/Ubuntu)
 
