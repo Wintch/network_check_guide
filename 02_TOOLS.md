@@ -22,6 +22,30 @@ basics — the table below flags what's usually missing.
 | `systemctl list-timers` | Reveals scheduled jobs (cron/systemd timers) that might be touching the network | built-in (systemd) | Yes |
 | `journalctl -u <service>` | History of what a specific watchdog/service actually did and when | built-in (systemd) | Yes |
 | `quick_check.py` | 1-command automated pre-work sanity check in ~20-40s | `scripts/quick_check.py` | Built-in script (Python stdlib) |
+| `net_watchdog.py` | Unattended background monitoring (minutes to days): periodic-outage/retransmit detection, ad-tech telemetry tracking, or LAN malware/rogue-device inventory | `scripts/net_watchdog.py` | Built-in script (Python stdlib) |
+
+## Which script: `quick_check.py` vs `net_watchdog.py`
+
+They don't overlap — one is a snapshot, the other a long-running monitor — so use both where
+they apply rather than picking one:
+
+| | `quick_check.py` | `net_watchdog.py` |
+|---|---|---|
+| Runs for | ~20-40s, then exits with a report | Minutes to days (`--duration`, or as a systemd timer) |
+| When | Before starting a work session, or whenever something feels off *right now* | Left running to catch something intermittent you can't reproduce on demand |
+| Checks | Link health, gateway reachability, DNS latency + local cache, Path MTU, dual-stack, real HTTPS handshake timing — see `01_QUICK_CHECKLIST.md` | Three independent `--mode`s: `stability` (periodic gateway-ping gaps, TCP retransmit growth, Wi-Fi/carrier flaps — `03_`/`04_`/`05_`), `telemetry` (ad-tech/ACR domain matching — `12_`), `malware` (LAN device inventory, C2 ports, bandwidth anomalies — `12_`) — see `09_BACKGROUND_WATCHDOG.md` |
+| Output | One human-readable (or `--json`) report, once | Alerts as they happen (desktop notification, log file), plus a JSON summary per run |
+
+**Not worth merging into one script.** They have different failure models to guard against
+(a bad *moment* to start work vs. a bad *pattern* over time) and almost disjoint flag surfaces
+— `quick_check.py`'s only knob is which host to test against, while `net_watchdog.py` has
+~20 tunables across three unrelated detection domains (LAN scanning, telemetry domain lists,
+bandwidth thresholds). Combining them would force the 30-second pre-work check to carry the
+weight (and startup cost — LAN `nmap` sweep, domain-list loading) of a security monitor most
+sessions never need, and would force `net_watchdog.py`'s unattended/systemd use case to carry
+one-shot-only checks (Path MTU probing, dual-stack sanity) that don't make sense to repeat
+every 5 seconds for hours. Keeping them separate keeps each one's flag surface and runtime
+cost matched to what it's actually for.
 
 ## One-shot install (Debian/Ubuntu)
 
