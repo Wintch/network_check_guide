@@ -90,3 +90,7 @@ USB NICs, watchdogs, cron)  →  ISP  →  remote API/service
 Almost every "the AI feels slow/flaky" complaint that isn't a model-side issue is solved
 somewhere in the first three hops. Don't jump to "ISP shaping" or "API is degraded" without
 ruling those out with real data — see [`05_AI_WORKLOAD_AND_LATENCY.md`](05_AI_WORKLOAD_AND_LATENCY.md) for exactly how.
+
+## License
+
+MIT — see [`LICENSE`](LICENSE).
