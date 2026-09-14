@@ -247,6 +247,11 @@ caching benefit lost by leaving dnsmasq out — Option B alone covers both goals
 `scripts/quick_check.py`'s cache detection (section 3 of its report) works with either option
 unchanged — it flags any loopback nameserver (`127.x.x.x`), not just `127.0.0.1`.
 
+This "why not" is specific to NetworkManager's `dns=dnsmasq` plugin. If you're encrypting DNS
+for a whole LAN behind a **standalone dnsmasq** (a router/DHCP server, not NetworkManager) —
+different scenario, different mechanism, chaining works fine there — see
+[`13_DNS_ENCRYPTION_AND_LEAK_DETECTION.md`](13_DNS_ENCRYPTION_AND_LEAK_DETECTION.md).
+
 ## When something looks wrong
 
 Don't reset/restart anything blind. Go in order:

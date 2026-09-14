@@ -37,6 +37,7 @@ is degraded, it points you directly to the relevant guide file below.
 | **Cloud gaming or VR streaming drops frames / resolution drops silently** | Packet jitter, missing DSCP marking, 2.4GHz interference or Wi-Fi power save | [`07_GAME_AND_VR_STREAMING.md`](07_GAME_AND_VR_STREAMING.md) & [`08_QOS_TRAFFIC_SHAPING_AND_5GHZ.md`](08_QOS_TRAFFIC_SHAPING_AND_5GHZ.md) |
 | **Unexplained bandwidth consumption or rogue devices on LAN** | Smart-TV/ACR ad-tech telemetry, piracy STB streaming, or malware C2 traffic | [`12_SECURITY_AND_PARASITIC_TRAFFIC.md`](12_SECURITY_AND_PARASITIC_TRAFFIC.md) |
 | **Unattended continuous monitoring** | Catch recurring blips in days rather than months | [`09_BACKGROUND_WATCHDOG.md`](09_BACKGROUND_WATCHDOG.md) |
+| **DNS queries visible to your ISP/network, or unsure who's still resolving in plaintext** | No DNS encryption upstream, or a client/host bypassing your resolver | [`13_DNS_ENCRYPTION_AND_LEAK_DETECTION.md`](13_DNS_ENCRYPTION_AND_LEAK_DETECTION.md) |
 
 ---
 
@@ -67,6 +68,10 @@ is degraded, it points you directly to the relevant guide file below.
     vs Mosh for human typing.
 12. **[`12_SECURITY_AND_PARASITIC_TRAFFIC.md`](12_SECURITY_AND_PARASITIC_TRAFFIC.md)** — ad-tech/ACR telemetry detection, unknown LAN devices,
     and sustained anomalous streams.
+13. **[`13_DNS_ENCRYPTION_AND_LEAK_DETECTION.md`](13_DNS_ENCRYPTION_AND_LEAK_DETECTION.md)** — encrypting DNS upstream
+    (dnscrypt-proxy + dnsmasq) once at the resolver instead of per-device, then auditing with
+    `tcpdump` to confirm nothing is still leaking plaintext queries — including Android's
+    client-side Private DNS option.
 
 ## Golden rule
 
