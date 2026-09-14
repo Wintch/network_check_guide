@@ -23,6 +23,10 @@ In ~20-30 seconds, it validates link speed, carrier flaps, first-hop gateway lat
 periodic gap signatures, DNS lookup times, and Path MTU (1500 vs 1492 PPPoE). If anything
 is degraded, it points you directly to the relevant guide file below.
 
+If it reports no local DNS cache, `scripts/setup_encrypted_dns.sh` applies the fix
+(dnscrypt-proxy → DoH + local cache) to a `dhcpcd`-managed Debian host in one non-interactive
+run, with its own rollback — see [`01_QUICK_CHECKLIST.md`](01_QUICK_CHECKLIST.md) §7.
+
 ---
 
 ## Symptom Triage: Where to Go First
