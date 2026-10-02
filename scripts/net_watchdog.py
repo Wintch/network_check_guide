@@ -688,7 +688,15 @@ class Watchdog:
         (implicitly) ordinary traffic."""
         self.refresh_dns_maps()
         now = time.monotonic()
-        for conn in sample_ss():
+        conns = sample_ss()
+        live = {(c["local"], c["peer"]) for c in conns}
+        # Drop state for connections that are gone so it cannot grow unbounded or be
+        # mistaken for a later connection that reuses the same local/peer pair.
+        for stale in [k for k in self.bw_history if k not in live]:
+            del self.bw_history[stale]
+        for stale in [k for k in self.unclassified_streak if k not in live]:
+            del self.unclassified_streak[stale]
+        for conn in conns:
             peer_ip, peer_port = split_host_port(conn["peer"])
             key = (conn["local"], conn["peer"])
             total_bytes = conn["bytes_acked"] + conn["bytes_received"]
@@ -696,8 +704,10 @@ class Watchdog:
             mbps = None
             if prev is not None:
                 dt = now - prev["ts"]
-                if dt > 0:
-                    mbps = max(0, total_bytes - prev["bytes"]) * 8 / dt / 1_000_000
+                if dt > 0 and total_bytes >= prev["bytes"]:  # lower counter = reset, no rate
+                    mbps = (total_bytes - prev["bytes"]) * 8 / dt / 1_000_000
+                else:
+                    self.unclassified_streak.pop(key, None)
             self.bw_history[key] = {"bytes": total_bytes, "ts": now}
 
             domain = self.telemetry_ip_map.get(peer_ip)
