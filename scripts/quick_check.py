@@ -25,6 +25,7 @@ import socket
 import ssl
 import subprocess
 import sys
+import threading
 import time
 from urllib.parse import urlparse
 
@@ -243,7 +244,8 @@ def check_gateway_pings(gateway_ip: str, count: int = 25) -> dict:
         "gateway": gateway_ip,
         "transmitted": count,
         "received": 0,
-        "loss_pct": 100.0,
+        "loss_pct": None,       # None = could not be measured (see "measured")
+        "measured": False,
         "rtt_min": None,
         "rtt_avg": None,
         "rtt_max": None,
@@ -266,8 +268,15 @@ def check_gateway_pings(gateway_ip: str, count: int = 25) -> dict:
             timestamps.append(float(m.group(1)))
 
     result["received"] = len(timestamps)
-    if count > 0:
-        result["loss_pct"] = round(((count - len(timestamps)) / count) * 100.0, 1)
+    # ping missing / timed out / produced nothing we can read (not even its summary) is a
+    # measurement failure, not 100% loss. Real loss still prints the "packets transmitted" line.
+    summary_m = re.search(r"(\d+) packets transmitted, (\d+) (?:packets )?received", out)
+    if rc in (-1, -2) or (not timestamps and not summary_m):
+        reason = err or f"ping exited rc={rc} with unparseable output"
+        result["issues"].append(f"Gateway ping could not be measured: {reason}")
+        return result
+    result["measured"] = True
+    result["loss_pct"] = round(((count - len(timestamps)) / count) * 100.0, 1)
 
     # Parse ping summary line
     # rtt min/avg/max/mdev = 0.456/0.789/1.234/0.120 ms
@@ -422,35 +431,46 @@ def check_path_mtu(target_ip: str = "8.8.8.8") -> dict:
         "warnings": [],
     }
 
-    # Probes: (payload_size, resulting_packet_mtu, label)
-    # Payload = MTU - 20 (IPv4 header) - 8 (ICMP header) = MTU - 28
-    probes = [
-        (1472, 1500, "Standard Ethernet 1500"),
-        (1464, 1492, "PPPoE / DSL 1492"),
-        (1392, 1420, "WireGuard / VPN 1420"),
-        (1200, 1228, "Conservative Minimum"),
-    ]
-
-    working_mtu = None
-    for payload, mtu, label in probes:
-        # ping -M do -> set Don't Fragment flag
+    # Payload = MTU - 20 (IPv4 header) - 8 (ICMP header) = MTU - 28.
+    def probe(payload):
+        """True if a DF ping of this payload size gets answered. Local-MTU rejections
+        ("Message too long") and ICMP "frag needed" count as not fitting; only an
+        unanswered packet that was not rejected is a silent black-hole signature."""
         rc, out, err = run_cmd(["ping", "-M", "do", "-s", str(payload), "-c", "2", "-W", "2", target_ip])
         combined = out + "\n" + err
         if rc == 0 and "2 received" in out:
-            working_mtu = mtu
-            result["max_working_payload"] = payload
-            result["effective_mtu"] = mtu
-            break
-        elif "sendmsg" in combined or "Frag needed" in combined or "Message too long" in combined:
-            # Local interface MTU already caps this size (e.g. PPPoE tunnel), or an explicit
-            # ICMP PMTUD response was received — both are healthy, expected behavior, not a black hole.
-            pass
-        elif rc != 0 and "100% packet loss" in combined:
-            # No local rejection and no ICMP response at all: the oversized packet left the
-            # host but nothing came back — a real silent black hole signature.
-            result["warnings"].append(
-                f"Silent packet drop at MTU {mtu} (possible ICMP black-hole router filtering fragmentation notifications)"
-            )
+            return True
+        if rc != 0 and "100% packet loss" in combined and not any(
+            t in combined for t in ("sendmsg", "Frag needed", "Message too long")
+        ):
+            nonlocal silent_drops
+            silent_drops += 1
+        return False
+
+    silent_drops = 0
+    HI, LO = 1472, 1200          # 1500 and 1228: the largest and smallest sizes worth reporting
+    working_mtu = None
+    if probe(HI):
+        working_mtu = HI + 28
+    elif probe(LO):
+        # Binary search the largest payload that works: lo works, hi fails. Assumes the path is
+        # monotonic (anything smaller than a working size also works), which holds for MTU.
+        lo, hi = LO, HI
+        while hi - lo > 1:
+            mid = (lo + hi) // 2
+            if probe(mid):
+                lo = mid
+            else:
+                hi = mid
+        working_mtu = lo + 28
+    if working_mtu is not None:
+        result["max_working_payload"] = working_mtu - 28
+        result["effective_mtu"] = working_mtu
+    if silent_drops:
+        result["warnings"].append(
+            f"{silent_drops} oversized DF probe(s) were dropped silently (no ICMP reply, no local "
+            "rejection): possible ICMP black-hole router filtering fragmentation notifications"
+        )
 
     if working_mtu == 1500:
         result["is_standard_1500"] = True
@@ -462,18 +482,41 @@ def check_path_mtu(target_ip: str = "8.8.8.8") -> dict:
     elif working_mtu and working_mtu < 1492:
         result["is_vpn_or_tunnel"] = True
         result["warnings"].append(
-            f"Path MTU is reduced to {working_mtu} (VPN, overlay, or tunnel overhead). Ensure client/wireguard MTU matches."
+            f"Path MTU is {working_mtu} (VPN, overlay, or tunnel overhead). Ensure client/wireguard MTU matches."
+        )
+    elif working_mtu and working_mtu < 1500:
+        result["warnings"].append(
+            f"Path MTU is {working_mtu}, an unusual value between PPPoE (1492) and Ethernet (1500). Check for a mis-set interface/tunnel MTU."
         )
     elif working_mtu is None:
         result["issues"].append(
-            "Could not determine Path MTU; even 1200-byte ICMP packets with DF failed to reach target."
+            "Could not determine Path MTU; even 1200-byte ICMP payloads with DF failed to reach target."
         )
 
     return result
 
 
-def check_real_api_timings(target_url: str, attempts: int = 3) -> dict:
-    """Measure per-phase timing (DNS, TCP, TLS, TTFB, Total) to real API endpoint."""
+def resolve_with_timeout(host: str, port: int, family: int, timeout: float = 3.0) -> str | None:
+    """First address of `host` for one IP family, or None if it has none or resolution exceeds
+    `timeout`. getaddrinfo has no timeout of its own, so run it in a daemon thread."""
+    box: list = []
+
+    def work():
+        try:
+            box.append(socket.getaddrinfo(host, port, family, socket.SOCK_STREAM)[0][4][0])
+        except OSError:
+            box.append(None)
+
+    t = threading.Thread(target=work, daemon=True)
+    t.start()
+    t.join(timeout)
+    return box[0] if box else None
+
+
+def check_real_api_timings(target_url: str, attempts: int = 3, family: int = socket.AF_INET) -> dict:
+    """Measure per-phase timing (DNS, TCP, TLS, TTFB, Total) to real API endpoint over one
+    IP family (AF_INET or AF_INET6). When the family is unusable (no AAAA record, no route,
+    resolution timeout) every sample fails and `available` is False."""
     parsed = urlparse(target_url)
     host = parsed.hostname or target_url
     port = parsed.port or (443 if parsed.scheme == "https" else 80)
@@ -481,6 +524,8 @@ def check_real_api_timings(target_url: str, attempts: int = 3) -> dict:
 
     result = {
         "url": target_url,
+        "family": "IPv6" if family == socket.AF_INET6 else "IPv4",
+        "available": False,
         "host": host,
         "port": port,
         "samples": [],
@@ -506,7 +551,9 @@ def check_real_api_timings(target_url: str, attempts: int = 3) -> dict:
         try:
             # Phase 1: DNS
             t_dns_start = time.perf_counter()
-            ip_addr = socket.gethostbyname(host)
+            ip_addr = resolve_with_timeout(host, port, family)
+            if ip_addr is None:
+                raise OSError(f"no {result['family']} address (no record, or resolution timed out)")
             t_dns_end = time.perf_counter()
             sample["dns_ms"] = round((t_dns_end - t_dns_start) * 1000.0, 1)
 
@@ -556,6 +603,7 @@ def check_real_api_timings(target_url: str, attempts: int = 3) -> dict:
 
         time.sleep(0.5)
 
+    result["available"] = any(s["ok"] for s in result["samples"])
     valid_totals = [s["total_ms"] for s in result["samples"] if s["ok"]]
     valid_ttfbs = [s["ttfb_ms"] for s in result["samples"] if s["ok"] and s["ttfb_ms"] is not None]
     if valid_totals:
@@ -653,6 +701,11 @@ def main():
     dns_report = check_dns_health(args.host)
     mtu_report = check_path_mtu("8.8.8.8")
     api_report = check_real_api_timings(f"https://{args.host}")
+    api6_report = check_real_api_timings(f"https://{args.host}", attempts=1, family=socket.AF_INET6)
+    if not api6_report["available"]:
+        # IPv6 being unavailable is a fact about the network, not a fault: report it, don't fail on it.
+        api6_report["warnings"].append(f"IPv6 path to {args.host} not usable: {api6_report['samples'][0].get('error')}")
+        api6_report["issues"] = []
     public_ip4 = get_public_ip(ipv6=False)
 
     all_issues = iface_report.get("issues", []) + gw_report.get("issues", []) + dns_report.get("issues", []) + mtu_report.get("issues", []) + api_report.get("issues", [])
@@ -670,6 +723,7 @@ def main():
             "dns": dns_report,
             "mtu": mtu_report,
             "api_timing": api_report,
+            "api_timing_ipv6": api6_report,
             "issues": all_issues,
             "warnings": all_warnings,
         }
@@ -690,7 +744,9 @@ def main():
         print(f"  {badge('FAIL')} Interface {iface} is DOWN or degraded")
 
     print("\n" + c("2. Gateway Reachability & Gap Analysis", "bold"))
-    if gw_report.get("loss_pct", 100.0) == 0.0 and not gw_report.get("gaps"):
+    if gw_report.get("measured") is False and gw_report.get("gateway"):
+        print(f"  {badge('FAIL')} Gateway {gw}: ping could not be measured (not the same as 100% loss)")
+    elif gw_report.get("loss_pct", 100.0) == 0.0 and not gw_report.get("gaps"):
         print(f"  {badge('OK')} Gateway {gw}: 0% loss ({gw_report['received']}/{gw_report['transmitted']}), avg RTT: {gw_report.get('rtt_avg')}ms, no gaps")
     elif gw_report.get("gaps") and len(gw_report["gaps"]) >= 2:
         print(f"  {badge('FAIL')} Periodic gateway gaps detected: {gw_report['gaps']}s!")
@@ -729,6 +785,12 @@ def main():
         print(f"  {badge('OK')} https://{args.host}: connect={s0.get('tcp_ms')}ms tls={s0.get('tls_ms')}ms ttfb={s0.get('ttfb_ms')}ms total={api_report['avg_total_ms']}ms")
     else:
         print(f"  {badge('FAIL')} Could not establish HTTPS connection to {args.host}")
+
+    if api6_report.get("available"):
+        s6 = api6_report["samples"][0]
+        print(f"  {badge('OK')} IPv6 https://{args.host}: connect={s6.get('tcp_ms')}ms tls={s6.get('tls_ms')}ms ttfb={s6.get('ttfb_ms')}ms")
+    else:
+        print(f"  {badge('INFO')} IPv6 not usable for {args.host} (IPv4 results above are the only path measured)")
 
     if public_ip4:
         print(f"  {badge('INFO')} Public IPv4: {public_ip4}")

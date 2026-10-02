@@ -13,8 +13,10 @@ non-destructive — read-only checks, nothing that touches routing or config.
 > ```
 > It automates steps 1 through 5 below — link health, gateway gaps, Path MTU (1500 vs 1492
 > PPPoE), DNS latency, and whether a local DNS cache is active — and presents a colorized
-> verdict with recommendations. Steps 6-7 (which resolver to use, setting up a local cache)
-> are one-time decisions, not something to re-check every session.
+> verdict with recommendations. It separates "could not measure" (e.g. `ping` missing) from
+> real packet loss, and times the HTTPS handshake over IPv4 and, separately, IPv6; an unusable
+> IPv6 path is reported as a fact, not as a fault. Steps 6-7 (which resolver to use, setting up
+> a local cache) are one-time decisions, not something to re-check every session.
 
 ---
 
@@ -46,7 +48,10 @@ ping -M do -s 1472 -c 2 -W 2 8.8.8.8               # tests 1500 MTU (1472 payloa
 # If that fails or gives 'Frag needed (mtu=1492)':
 ping -M do -s 1464 -c 2 -W 2 8.8.8.8               # tests 1492 MTU (standard PPPoE fiber/DSL)
 ```
-If 1472 fails and 1464 works, your connection is MTU 1492. If large API streams or `git push`
+If 1472 fails and 1464 works, your connection is MTU 1492. (`quick_check.py` does not stop at
+those two sizes: if 1472 fails it binary-searches the largest payload that gets through, so a
+1496 or 1420 path is reported as such. It assumes the path is monotonic, i.e. anything smaller
+than a size that works also works.) If large API streams or `git push`
 hang while small pings work, check your router's MSS Clamping settings (see `03_WIRED_AND_GATEWAY.md`).
 
 ## 3. Wi-Fi: quick signal/quality check (skip if wired)
