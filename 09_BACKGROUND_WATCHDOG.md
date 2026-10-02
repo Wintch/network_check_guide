@@ -115,7 +115,16 @@ python3 scripts/net_watchdog.py --duration 300 --hosts api.anthropic.com
   live connections to — an AI API host, a work VPN endpoint, whatever this machine's
   long-lived low-latency traffic actually goes to. Without it, the ping-gap/Wi-Fi/carrier
   checks still run, just not the retransmit tracking (the startup block and every report tell
-  you plainly when this is the case, so it's never a silent gap).
+  you plainly when this is the case, so it's never a silent gap). A host that fails DNS at
+  start is retried every 30 s while the run lasts, and listed under `unresolved_hosts` in the
+  summary if it never resolves.
+- `--duration` is an effective limit: the loop checks the deadline between phases, caps the
+  nmap sweep to the time left, and bounds reverse-DNS lookups (1.5 s each), so a slow phase
+  cannot push the run far past it. One external command already in flight can still finish
+  its own timeout (5 s by default) first.
+- The summary's `tool_errors` lists external commands that were missing, timed out or exited
+  with an error (`ip`, `nmap`, `iw`, `ss`). An empty section in a report can mean "dependency
+  absent", not "nothing found" — check this field before trusting a clean result.
 - Gateway and primary interface are auto-detected (`ip route get 8.8.8.8`); a Wi-Fi interface
   is auto-detected as wireless if `--iface` (or the auto-detected one) has
   `/sys/class/net/<iface>/wireless` or `/phy80211`.

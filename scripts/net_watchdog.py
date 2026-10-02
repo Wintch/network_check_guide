@@ -131,17 +131,29 @@ def split_host_port(hostport):
     return hostport[: m.start()].strip("[]"), int(m.group(1))
 
 
+def call_with_timeout(fn, timeout, *args):
+    """Run fn(*args) in a daemon thread. Returns (ok, value): ok False means it raised or did
+    not finish within `timeout`. Needed for getaddrinfo/gethostbyaddr, which ignore
+    socket.setdefaulttimeout() and can otherwise block for the resolver's full retry cycle."""
+    box = []
+
+    def work():
+        try:
+            box.append((True, fn(*args)))
+        except Exception as e:
+            box.append((False, e))
+
+    t = threading.Thread(target=work, daemon=True)
+    t.start()
+    t.join(timeout)
+    return box[0] if box else (False, TimeoutError(f"no answer within {timeout}s"))
+
+
 def reverse_dns_cached(ip, cache):
     if ip in cache:
         return cache[ip]
-    name = None
-    try:
-        socket.setdefaulttimeout(1.5)
-        name = socket.gethostbyaddr(ip)[0]
-    except Exception:
-        pass
-    finally:
-        socket.setdefaulttimeout(None)
+    ok, val = call_with_timeout(socket.gethostbyaddr, 1.5, ip)
+    name = val[0] if ok else None
     cache[ip] = name
     return name
 
@@ -264,13 +276,34 @@ HOW TO USE IT (quick guide)
 """
 
 
-def sh(cmd, timeout=5):
+# Why external commands failed this run, {command: reason}, so the summary can tell "ip/nmap/iw
+# is missing" or "timed out" apart from a command that legitimately printed nothing.
+TOOL_ERRORS = {}
+
+
+def run_sh(cmd, timeout=5):
+    """Run cmd -> (rc, stdout, stderr). rc is None when it could not run at all (missing binary,
+    timeout, OS error); the reason is recorded in TOOL_ERRORS."""
+    name = cmd[0]
     try:
-        return subprocess.run(
-            cmd, capture_output=True, text=True, timeout=timeout
-        ).stdout
-    except Exception:
-        return ""
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    except FileNotFoundError:
+        TOOL_ERRORS[name] = "not installed"
+        return None, "", f"{name}: not installed"
+    except subprocess.TimeoutExpired:
+        TOOL_ERRORS[name] = f"timed out after {timeout}s"
+        return None, "", TOOL_ERRORS[name]
+    except Exception as e:
+        TOOL_ERRORS[name] = f"{type(e).__name__}: {e}"
+        return None, "", TOOL_ERRORS[name]
+    if proc.returncode != 0 and proc.stderr.strip():
+        TOOL_ERRORS[name] = f"exit {proc.returncode}: {proc.stderr.strip().splitlines()[0]}"
+    return proc.returncode, proc.stdout, proc.stderr
+
+
+def sh(cmd, timeout=5):
+    """stdout of cmd, "" on any failure; failures are recorded in TOOL_ERRORS (see run_sh)."""
+    return run_sh(cmd, timeout)[1]
 
 
 def detect_route():
@@ -491,6 +524,9 @@ def format_human_report(summary):
     return "\n".join(L)
 
 
+HOST_RETRY_SECONDS = 30
+
+
 class Watchdog:
     def __init__(self, args):
         self.args = args
@@ -502,11 +538,12 @@ class Watchdog:
         )
         self.hosts = [h.strip() for h in args.hosts.split(",") if h.strip()]
         self.host_ips = {}
+        self.deadline = None            # set by run(); bounds every phase of a sample
+        self.last_host_retry = time.monotonic()
         for h in self.hosts:
-            try:
-                self.host_ips[h] = socket.gethostbyname(h)
-            except socket.gaierror:
-                print(f"warning: could not resolve {h}, skipping", file=sys.stderr)
+            if not self._resolve_host(h):
+                print(f"warning: could not resolve {h}; will retry every "
+                      f"{HOST_RETRY_SECONDS}s while running", file=sys.stderr)
 
         run_id = datetime.now().strftime("%Y%m%dT%H%M%S")
         log_dir = Path(args.log_dir) if args.log_dir else (
@@ -564,6 +601,28 @@ class Watchdog:
         self.lan_nodes_seen = {}
         self._lan_present = set()   # MACs seen in the previous scan of this run
         self.gone_devices_this_run = []
+
+    def _resolve_host(self, host):
+        ok, ip = call_with_timeout(socket.gethostbyname, 3.0, host)
+        if ok:
+            self.host_ips[host] = ip
+        return ok
+
+    def retry_unresolved_hosts(self):
+        """A --hosts entry that failed DNS at start (or later) is retried, not dropped for the run."""
+        pending = [h for h in self.hosts if h not in self.host_ips]
+        if not pending or time.monotonic() - self.last_host_retry < HOST_RETRY_SECONDS:
+            return
+        self.last_host_retry = time.monotonic()
+        for h in pending:
+            if self.time_left() <= 0:
+                return
+            if self._resolve_host(h):
+                self.log_event("host_resolved", {"host": h, "ip": self.host_ips[h]})
+                print(f"resolved {h} -> {self.host_ips[h]}; now monitoring it", file=sys.stderr)
+
+    def time_left(self):
+        return float("inf") if self.deadline is None else self.deadline - time.monotonic()
 
     # -- logging / alerting --------------------------------------------
     def log_event(self, kind, data):
@@ -706,6 +765,8 @@ class Watchdog:
         for stale in [k for k in self.unclassified_streak if k not in live]:
             del self.unclassified_streak[stale]
         for conn in conns:
+            if self.time_left() <= 0:
+                break
             peer_ip, peer_port = split_host_port(conn["peer"])
             key = (conn["local"], conn["peer"])
             total_bytes = conn["bytes_acked"] + conn["bytes_received"]
@@ -773,7 +834,9 @@ class Watchdog:
         if self.last_lan_scan and now - self.last_lan_scan < self.args.lan_scan_interval:
             return
         self.last_lan_scan = now
-        nodes = scan_lan_nodes(self.lan_cidr, timeout=self.args.lan_scan_timeout)
+        # never let a slow nmap sweep run past the configured duration
+        scan_timeout = max(1.0, min(self.args.lan_scan_timeout, self.time_left()))
+        nodes = scan_lan_nodes(self.lan_cidr, timeout=scan_timeout)
         if nodes is None:
             if not self._nmap_warned:
                 self._nmap_warned = True
@@ -852,8 +915,11 @@ class Watchdog:
 
     # -- periodic sampling (main-thread loop) ----------------------------
     def sample_once(self):
+        self.retry_unresolved_hosts()
         if self.mode in ("stability", "all"):
-            for host, ip in self.host_ips.items():
+            for host, ip in list(self.host_ips.items()):
+                if self.time_left() <= 0:
+                    return
                 for conn in sample_ss(ip):
                     key = (host, conn["local"], conn["peer"])
                     prev = self.retrans_history.get(key, {"bytes": 0, "growth": 0})
@@ -877,7 +943,7 @@ class Watchdog:
                         )
                         prev["growth"] = 0  # avoid re-alerting every sample
 
-            if self.wlan_iface:
+            if self.wlan_iface and self.time_left() > 0:
                 w = sample_wifi(self.wlan_iface)
                 self.log_event("wifi_sample", w)
                 if w["signal_dbm"] is not None and w["signal_dbm"] < self.args.wifi_signal_threshold:
@@ -916,10 +982,10 @@ class Watchdog:
                         {"from": self.carrier_start, "to": now_cc},
                     )
 
-        if self.mode in ("telemetry", "malware", "all"):
+        if self.mode in ("telemetry", "malware", "all") and self.time_left() > 0:
             self.sample_traffic_categories()
 
-        if self.mode in ("malware", "all"):
+        if self.mode in ("malware", "all") and self.time_left() > 0:
             self.maybe_scan_lan()
 
     def print_heartbeat(self, deadline):
@@ -966,6 +1032,7 @@ class Watchdog:
             t.start()
 
         deadline = time.monotonic() + self.args.duration
+        self.deadline = deadline
         last_heartbeat = time.monotonic()
         try:
             while time.monotonic() < deadline and not self.stop_event.is_set():
@@ -973,7 +1040,8 @@ class Watchdog:
                 if self.args.heartbeat > 0 and time.monotonic() - last_heartbeat >= self.args.heartbeat:
                     self.print_heartbeat(deadline)
                     last_heartbeat = time.monotonic()
-                time.sleep(self.args.interval)
+                # capped at the deadline and woken early by stop_event, so shutdown never waits a full interval
+                self.stop_event.wait(max(0.0, min(self.args.interval, deadline - time.monotonic())))
         except KeyboardInterrupt:
             print("\nStopped by hand (Ctrl+C) -- shutting down and still writing the summary.")
         finally:
@@ -1000,6 +1068,10 @@ class Watchdog:
             "anomaly_count": len(self.anomalies),
             "anomalies": self.anomalies,
             "pcap": self.pcap_path,
+            "unresolved_hosts": [h for h in self.hosts if h not in self.host_ips],
+            # commands that were missing, timed out or errored: an empty section in this report
+            # may mean "dependency absent" rather than "nothing found"
+            "tool_errors": dict(TOOL_ERRORS),
         }
         if self.mode in ("telemetry", "all"):
             summary["telemetry_hits"] = self.telemetry_hits
