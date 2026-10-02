@@ -112,19 +112,23 @@ def detect_ipv6_gateway() -> tuple[str | None, str | None]:
 
 
 def get_public_ip(ipv6: bool = False, timeout: float = 3.0) -> str | None:
-    """Fetch public IP via external service."""
-    host = "api64.ipify.org" if ipv6 else "api.ipify.org"
-    url = f"https://{host}"
-    try:
-        import urllib.request
+    """Fetch public IP via external service, trying a second one if the first fails."""
+    import urllib.request
 
-        req = urllib.request.Request(
-            url, headers={"User-Agent": "quick_check/1.0"}
-        )
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return resp.read().decode("utf-8").strip()
-    except Exception:
-        return None
+    hosts = ("api64.ipify.org", "ipv6.icanhazip.com") if ipv6 else (
+        "api.ipify.org",
+        "ipv4.icanhazip.com",
+    )
+    for host in hosts:
+        try:
+            req = urllib.request.Request(
+                f"https://{host}", headers={"User-Agent": "quick_check/1.0"}
+            )
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return resp.read().decode("utf-8").strip()
+        except Exception:
+            continue
+    return None
 
 
 # --- Diagnostic Checks ---

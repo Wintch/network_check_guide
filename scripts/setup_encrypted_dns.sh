@@ -19,12 +19,13 @@ die() { echo "!! $*"; exit 1; }
 command -v dhcpcd >/dev/null || die "no dhcpcd here -- if this host uses NetworkManager, follow 01_QUICK_CHECKLIST.md section 7 Option B as written (nmcli), not this script"
 
 mkdir -p "$BK"
+WORK=$(mktemp -d) && trap 'rm -rf "$WORK"' EXIT
 cp -a /etc/resolv.conf /etc/dhcpcd.conf "$BK"/ 2>/dev/null
 echo "rollback copies in $BK"
 
 # A dependency-free DNS query: minimal Debian installs often have no dig/nslookup at all
 # (13_DNS_ENCRYPTION_AND_LEAK_DETECTION.md section 4).
-cat > /tmp/dnsq.py <<'PY'
+cat > "$WORK"/dnsq.py <<'PY'
 import socket, struct, sys, time, random
 srv, name = sys.argv[1], sys.argv[2]
 q = b''.join(bytes([len(p)]) + p.encode() for p in name.split('.')) + b'\x00'
@@ -83,9 +84,9 @@ PY
 step "3/6  validate config and probe the chosen resolvers"
 # -check parses the file AND actually reaches each server_name, printing its measured latency. A
 # name that no longer exists in the public list surfaces here, not at the next reboot.
-dnscrypt-proxy -config "$TOML" -check > /tmp/dnscrypt-check.log 2>&1
+dnscrypt-proxy -config "$TOML" -check > "$WORK"/dnscrypt-check.log 2>&1
 rc=$?
-tail -20 /tmp/dnscrypt-check.log | sed 's/^/  /'
+tail -20 "$WORK"/dnscrypt-check.log | sed 's/^/  /'
 # A root-run -check leaves root-owned files in the cache dir; the service runs as
 # _dnscrypt-proxy and would silently stop refreshing the resolver list. Hand them back.
 chown -R _dnscrypt-proxy:nogroup /var/cache/dnscrypt-proxy /var/log/dnscrypt-proxy 2>/dev/null
@@ -102,8 +103,8 @@ sleep 2
 systemctl is-enabled dnscrypt-proxy.service dnscrypt-proxy.socket
 
 step "5/6  test the proxy directly, before touching system DNS"
-python3 /tmp/dnsq.py 127.0.2.1 api.anthropic.com || die "127.0.2.1 is not answering -- system DNS left untouched"
-python3 /tmp/dnsq.py 127.0.2.1 github.com || die "127.0.2.1 answered once but not twice -- system DNS left untouched"
+python3 "$WORK"/dnsq.py 127.0.2.1 api.anthropic.com || die "127.0.2.1 is not answering -- system DNS left untouched"
+python3 "$WORK"/dnsq.py 127.0.2.1 github.com || die "127.0.2.1 answered once but not twice -- system DNS left untouched"
 
 step "6/6  point the system at it"
 # `static` replaces the DHCP-supplied list outright. That is the point: a leftover second
@@ -120,6 +121,7 @@ if ! python3 -c 'import socket,sys; socket.getaddrinfo("api.anthropic.com",443)'
 	echo "!! system resolution FAILED -- rolling back"
 	cp -a "$BK/dhcpcd.conf" /etc/dhcpcd.conf
 	cp -a "$BK/resolv.conf" /etc/resolv.conf
+	cp -a "$BK/dnscrypt-proxy.toml.orig" "$TOML"
 	dhcpcd -n >/dev/null 2>&1
 	die "rolled back to $BK; dnscrypt-proxy left installed but unused"
 fi

@@ -215,9 +215,11 @@ def load_known_nodes(path):
 
 
 def save_known_nodes(path, data):
+    tmp = f"{path}.tmp"
     try:
-        with open(path, "w") as f:
+        with open(tmp, "w") as f:
             json.dump(data, f, indent=2)
+        os.replace(tmp, path)  # atomic: a crash mid-write cannot truncate the real file
     except Exception:
         pass
 
@@ -303,10 +305,22 @@ def sample_ss(ip=None):
     if ip:
         cmd += ["dst", ip]
     out = sh(cmd)
-    lines = [l for l in out.splitlines() if l.strip()]
+    # A connection is a head line (unindented) followed by an indented detail
+    # line. Pair by indentation rather than assuming strict alternation, so a
+    # head with no detail line cannot shift every later pair.
+    pairs = []
+    for line in out.splitlines():
+        if not line.strip():
+            continue
+        if line[0] in " \t":
+            if pairs and pairs[-1][1] is None:
+                pairs[-1][1] = line
+        else:
+            pairs.append([line, None])
     conns = []
-    for i in range(0, len(lines) - 1, 2):
-        head, detail = lines[i], lines[i + 1]
+    for head, detail in pairs:
+        if detail is None:
+            continue
         parts = head.split()
         if len(parts) < 5:
             continue
