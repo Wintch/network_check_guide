@@ -10,8 +10,11 @@
 # verified first, and the system-DNS switch reverts itself if a real lookup fails afterwards.
 set -u
 
-BK=/root/dns-rollback-$(date +%Y%m%d-%H%M%S)
-TOML=/etc/dnscrypt-proxy/dnscrypt-proxy.toml
+# Paths are overridable so tests can run this against a sandbox instead of the real /etc.
+BK=${BK_ROOT:-/root}/dns-rollback-$(date +%Y%m%d-%H%M%S)
+TOML=${TOML:-/etc/dnscrypt-proxy/dnscrypt-proxy.toml}
+DHCPCD_CONF=${DHCPCD_CONF:-/etc/dhcpcd.conf}
+RESOLV_CONF=${RESOLV_CONF:-/etc/resolv.conf}
 step() { echo; echo "== $*"; }
 die() { echo "!! $*"; exit 1; }
 
@@ -19,8 +22,27 @@ die() { echo "!! $*"; exit 1; }
 command -v dhcpcd >/dev/null || die "no dhcpcd here -- if this host uses NetworkManager, follow 01_QUICK_CHECKLIST.md section 7 Option B as written (nmcli), not this script"
 
 mkdir -p "$BK"
-WORK=$(mktemp -d) && trap 'rm -rf "$WORK"' EXIT
-cp -a /etc/resolv.conf /etc/dhcpcd.conf "$BK"/ 2>/dev/null
+WORK=$(mktemp -d)
+cp -a "$RESOLV_CONF" "$DHCPCD_CONF" "$BK"/ 2>/dev/null
+
+# Rollback on ANY failing exit once armed (set -u aborts, failed die, signal), never on success.
+ROLLBACK_ARMED=0
+on_exit() {
+	rc=$?
+	rm -rf "$WORK"
+	if [ "$rc" -ne 0 ] && [ "$ROLLBACK_ARMED" -eq 1 ]; then
+		echo "!! exit $rc after changes started -- restoring files from $BK"
+		[ ! -f "$BK/dhcpcd.conf" ] || cp -a "$BK/dhcpcd.conf" "$DHCPCD_CONF"
+		[ ! -f "$BK/resolv.conf" ] || cp -a "$BK/resolv.conf" "$RESOLV_CONF"
+		[ ! -f "$BK/dnscrypt-proxy.toml.orig" ] || cp -a "$BK/dnscrypt-proxy.toml.orig" "$TOML"
+		dhcpcd -n >/dev/null 2>&1 || true
+		systemctl restart dnscrypt-proxy.service >/dev/null 2>&1 || true
+	fi
+	exit "$rc"
+}
+trap on_exit EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 echo "rollback copies in $BK"
 
 # A dependency-free DNS query: minimal Debian installs often have no dig/nslookup at all
@@ -44,6 +66,7 @@ else
 	echo "  already installed"
 fi
 cp -a "$TOML" "$BK/dnscrypt-proxy.toml.orig"
+ROLLBACK_ARMED=1   # from here on, state is modified: any failing exit restores $BK
 
 step "2/6  configure resolvers (Cloudflare + Quad9 over DoH, p2 load balancing, local cache)"
 # Edit the shipped toml in place rather than replacing it: Debian's default carries the
@@ -90,7 +113,7 @@ tail -20 "$WORK"/dnscrypt-check.log | sed 's/^/  /'
 # A root-run -check leaves root-owned files in the cache dir; the service runs as
 # _dnscrypt-proxy and would silently stop refreshing the resolver list. Hand them back.
 chown -R _dnscrypt-proxy:nogroup /var/cache/dnscrypt-proxy /var/log/dnscrypt-proxy 2>/dev/null
-[ $rc -eq 0 ] || die "dnscrypt-proxy -check failed (rc=$rc) -- nothing changed yet"
+[ $rc -eq 0 ] || die "dnscrypt-proxy -check failed (rc=$rc) -- rolling back the toml edit"
 
 step "4/6  enable the service (and the socket the resolvconf hook likes to silently drop)"
 systemctl disable --now dnscrypt-proxy-resolvconf >/dev/null 2>&1
@@ -100,7 +123,7 @@ systemctl disable --now dnscrypt-proxy-resolvconf >/dev/null 2>&1
 systemctl enable --now dnscrypt-proxy.socket || die "cannot enable dnscrypt-proxy.socket"
 systemctl restart dnscrypt-proxy.service
 sleep 2
-systemctl is-enabled dnscrypt-proxy.service dnscrypt-proxy.socket
+systemctl is-enabled dnscrypt-proxy.service dnscrypt-proxy.socket || true
 
 step "5/6  test the proxy directly, before touching system DNS"
 python3 "$WORK"/dnsq.py 127.0.2.1 api.anthropic.com || die "127.0.2.1 is not answering -- system DNS left untouched"
@@ -109,24 +132,20 @@ python3 "$WORK"/dnsq.py 127.0.2.1 github.com || die "127.0.2.1 answered once but
 step "6/6  point the system at it"
 # `static` replaces the DHCP-supplied list outright. That is the point: a leftover second
 # nameserver is a plaintext fallback glibc will happily use whenever the first is slow.
-sed -i '/^[[:space:]]*static[[:space:]]\+domain_name_servers=/d' /etc/dhcpcd.conf
-printf '\n# encrypted DNS: dnscrypt-proxy (DoH) listens here -- see 01_QUICK_CHECKLIST.md section 7 Option B\nstatic domain_name_servers=127.0.2.1\n' >> /etc/dhcpcd.conf
+sed -i '/^[[:space:]]*static[[:space:]]\+domain_name_servers=/d' "$DHCPCD_CONF"
+printf '\n# encrypted DNS: dnscrypt-proxy (DoH) listens here -- see 01_QUICK_CHECKLIST.md section 7 Option B\nstatic domain_name_servers=127.0.2.1\n' >> "$DHCPCD_CONF"
 # -n rebinds without releasing the lease, so this does not drop the SSH session we are in.
 dhcpcd -n >/dev/null 2>&1
 sleep 3
-grep -q '127\.0\.2\.1' /etc/resolv.conf || printf '# rewritten by setup_encrypted_dns.sh\nnameserver 127.0.2.1\n' > /etc/resolv.conf
+grep -q '127\.0\.2\.1' "$RESOLV_CONF" || printf '# rewritten by setup_encrypted_dns.sh\nnameserver 127.0.2.1\n' > "$RESOLV_CONF"
 
-echo; echo "resolv.conf now:"; sed 's/^/  /' /etc/resolv.conf
+echo; echo "resolv.conf now:"; sed 's/^/  /' "$RESOLV_CONF"
 if ! python3 -c 'import socket,sys; socket.getaddrinfo("api.anthropic.com",443)' 2>/dev/null; then
-	echo "!! system resolution FAILED -- rolling back"
-	cp -a "$BK/dhcpcd.conf" /etc/dhcpcd.conf
-	cp -a "$BK/resolv.conf" /etc/resolv.conf
-	cp -a "$BK/dnscrypt-proxy.toml.orig" "$TOML"
-	dhcpcd -n >/dev/null 2>&1
-	die "rolled back to $BK; dnscrypt-proxy left installed but unused"
+	die "system resolution FAILED -- rolled back to $BK; dnscrypt-proxy left installed but unused"
 fi
+ROLLBACK_ARMED=0
 
 echo
 echo "OK -- system resolution works through 127.0.2.1 (encrypted DoH + local cache)."
 echo "Confirm the wire is encrypted:  ss -tn state established | grep -E '1\.1\.1\.1|1\.0\.0\.1|9\.9\.9\.9|149\.112\.112'"
-echo "Revert:  cp $BK/dhcpcd.conf /etc/dhcpcd.conf && cp $BK/resolv.conf /etc/resolv.conf && dhcpcd -n"
+echo "Revert:  cp $BK/dhcpcd.conf $DHCPCD_CONF && cp $BK/resolv.conf $RESOLV_CONF && dhcpcd -n"
