@@ -90,6 +90,14 @@ Three independent checks, none of which need root or a threat-intel subscription
    `unknown_device` only fires starting from the *second* run, for a MAC that genuinely wasn't
    there before. If you don't recognize a flagged device, that's the single most direct
    security signal this whole guide produces.
+
+   **"Known" means "seen in some run", not "present now".** Each entry carries `first_seen` and
+   `last_seen`. A device that was in one scan of a run and is missing from the next raises
+   `device_gone` (listed in the summary as `gone_devices`), and the summary's
+   `absent_from_this_run` lists every known MAC this run did not see, with its last-seen date.
+   Treat absence as a hint: the inventory is only this host's neighbor table. An entry can
+   linger there after a device leaves until the kernel expires it, and a device that ignores
+   ping and ARP probes can be missed entirely.
 2. **Duplicate-MAC detection.** If the same MAC answers on more than one IP in the same scan,
    it's flagged. This is often completely benign (a floating/VRRP IP, a cloned VM template that
    never got its MAC regenerated) but it's also the visible symptom of ARP/MAC spoofing — worth

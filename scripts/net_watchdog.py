@@ -189,7 +189,11 @@ def is_locally_administered(mac):
 def scan_lan_nodes(cidr, timeout=30):
     """Ping-sweep `cidr` with nmap (populates the kernel ARP cache), then
     read the ARP/neighbor table for IP<->MAC. Returns {mac: [ips]}, or
-    None if nmap isn't installed (caller decides how to report that)."""
+    None if nmap isn't installed (caller decides how to report that).
+
+    Limit: this is the HOST's neighbor table, only as fresh as the sweep that populated it.
+    A device that is gone can linger there until the kernel expires the entry, and one that
+    ignores ping/ARP-probing may be missed. "Absent" is therefore a hint, not proof."""
     if not shutil.which("nmap"):
         return None
     sh(["nmap", "-sn", cidr], timeout=timeout)
@@ -558,6 +562,8 @@ class Watchdog:
         self.last_lan_scan = 0.0
         self.new_devices_this_run = []
         self.lan_nodes_seen = {}
+        self._lan_present = set()   # MACs seen in the previous scan of this run
+        self.gone_devices_this_run = []
 
     # -- logging / alerting --------------------------------------------
     def log_event(self, kind, data):
@@ -666,20 +672,23 @@ class Watchdog:
         if self.telemetry_ip_map and now - self.last_dns_refresh < self.args.dns_refresh_interval:
             return
         self.last_dns_refresh = now
-        for domain in self.telemetry_domains:
+        # Rebuild into new dicts and swap, so an IP that left a domain's record set (CDN rotation,
+        # reassigned address) stops being classified as that domain. A domain whose lookup fails
+        # keeps its previous IPs: a transient DNS error must not blank the map.
+        self.telemetry_ip_map = self._rebuild_ip_map(self.telemetry_domains, self.telemetry_ip_map)
+        self.malware_ip_map = self._rebuild_ip_map(self.malware_domains, self.malware_ip_map)
+
+    @staticmethod
+    def _rebuild_ip_map(domains, previous):
+        fresh = {}
+        for domain in domains:
             try:
                 _, _, ips = socket.gethostbyname_ex(domain)
-                for ip in ips:
-                    self.telemetry_ip_map[ip] = domain
             except socket.gaierror:
-                continue
-        for domain in self.malware_domains:
-            try:
-                _, _, ips = socket.gethostbyname_ex(domain)
-                for ip in ips:
-                    self.malware_ip_map[ip] = domain
-            except socket.gaierror:
-                continue
+                ips = [ip for ip, d in previous.items() if d == domain]
+            for ip in ips:
+                fresh[ip] = domain
+        return fresh
 
     def sample_traffic_categories(self):
         """One sampling pass for --mode telemetry/malware/all: classify
@@ -770,6 +779,18 @@ class Watchdog:
                 self._nmap_warned = True
                 self.alert("no_nmap", "nmap is not installed -- install `nmap` to enable the LAN node inventory (see 02_TOOLS.md).")
             return
+        for mac in sorted(self._lan_present - set(nodes)):
+            info = self.known_nodes.get(mac, {})
+            self.gone_devices_this_run.append({"mac": mac, "vendor": info.get("vendor"), "last_seen": info.get("last_seen")})
+            self.alert(
+                "device_gone",
+                f"LAN device {mac} ({info.get('vendor')}) was present in the previous scan and is "
+                f"no longer in this host's neighbor table (last seen {info.get('last_seen')}). "
+                "Normal if it was switched off or went to sleep; see the note on how this "
+                "inventory is built in scan_lan_nodes().",
+                {"mac": mac, "last_seen": info.get("last_seen")},
+            )
+        self._lan_present = set(nodes)
         for mac, ips in nodes.items():
             self.lan_nodes_seen[mac] = ips
             vendor = oui_vendor(mac)
@@ -987,6 +1008,12 @@ class Watchdog:
             summary["lan_cidr"] = self.lan_cidr
             summary["lan_nodes"] = self.known_nodes
             summary["new_devices"] = self.new_devices_this_run
+            summary["gone_devices"] = self.gone_devices_this_run
+            # "known" means seen in some run; presence in THIS run is whatever the scan found.
+            summary["absent_from_this_run"] = {
+                mac: {"vendor": n.get("vendor"), "last_seen": n.get("last_seen")}
+                for mac, n in self.known_nodes.items() if mac not in self.lan_nodes_seen
+            } if self.last_lan_scan else {}
             summary["firewall_suggestions"] = self.write_firewall_suggestions()
         with open(self.summary_path, "w") as f:
             json.dump(summary, f, indent=2)

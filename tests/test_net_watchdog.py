@@ -84,3 +84,59 @@ def test_sustained_high_bandwidth_alerts(monkeypatch):
         monkeypatch.setattr(w, "sample_ss", lambda t=total: [_conn(t)])
         dog.sample_traffic_categories()
     assert dog.alerts == ["unidentified_high_bandwidth"]
+
+
+def test_dns_map_drops_ips_that_left_the_record_set(monkeypatch):
+    dog = _bare_watchdog()
+    dog.telemetry_domains = ["ads.example"]
+    answers = {"ads.example": ["1.1.1.1", "2.2.2.2"]}
+    monkeypatch.setattr(w.socket, "gethostbyname_ex", lambda d: (d, [], answers[d]))
+    dog.refresh_dns_maps = w.Watchdog.refresh_dns_maps.__get__(dog)
+    dog.refresh_dns_maps()
+    assert set(dog.telemetry_ip_map) == {"1.1.1.1", "2.2.2.2"}
+    answers["ads.example"] = ["2.2.2.2", "3.3.3.3"]      # 1.1.1.1 rotated away
+    dog.last_dns_refresh = 0.0
+    dog.refresh_dns_maps()
+    assert set(dog.telemetry_ip_map) == {"2.2.2.2", "3.3.3.3"}
+
+
+def test_dns_map_keeps_previous_ips_when_lookup_fails(monkeypatch):
+    dog = _bare_watchdog()
+    dog.telemetry_domains = ["ads.example"]
+    dog.telemetry_ip_map = {"1.1.1.1": "ads.example"}
+
+    def boom(d):
+        raise w.socket.gaierror("temporary failure")
+
+    monkeypatch.setattr(w.socket, "gethostbyname_ex", boom)
+    dog.refresh_dns_maps = w.Watchdog.refresh_dns_maps.__get__(dog)
+    dog.refresh_dns_maps()
+    assert dog.telemetry_ip_map == {"1.1.1.1": "ads.example"}
+
+
+def _lan_dog(tmp_path, known):
+    dog = _bare_watchdog()
+    dog.lan_cidr = "10.0.0.0/24"
+    dog.args.lan_scan_interval = 0
+    dog.args.lan_scan_timeout = 1
+    dog.last_lan_scan = 0.0
+    dog.known_nodes = known
+    dog.known_nodes_path = str(tmp_path / "k.json")
+    dog._lan_baseline_run = False
+    dog.new_devices_this_run, dog.lan_nodes_seen = [], {}
+    dog._lan_present, dog.gone_devices_this_run = set(), []
+    dog._nmap_warned = False
+    return dog
+
+
+def test_device_that_disappears_between_scans_is_reported(monkeypatch, tmp_path):
+    dog = _lan_dog(tmp_path, {})
+    monkeypatch.setattr(w, "oui_vendor", lambda m: "Acme")
+    scans = iter([{"aa:bb": ["10.0.0.5"]}, {}])
+    monkeypatch.setattr(w, "scan_lan_nodes", lambda cidr, timeout=30: next(scans))
+    dog.maybe_scan_lan()
+    assert dog.gone_devices_this_run == []
+    dog.maybe_scan_lan()
+    assert [d["mac"] for d in dog.gone_devices_this_run] == ["aa:bb"]
+    assert dog.gone_devices_this_run[0]["last_seen"]            # carries the last-presence date
+    assert "device_gone" in dog.alerts
