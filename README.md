@@ -91,6 +91,16 @@ Almost every "the AI feels slow/flaky" complaint that isn't a model-side issue i
 somewhere in the first three hops. Don't jump to "ISP shaping" or "API is degraded" without
 ruling those out with real data — see [`05_AI_WORKLOAD_AND_LATENCY.md`](05_AI_WORKLOAD_AND_LATENCY.md) for exactly how.
 
+## Tests
+
+```
+python3 -m pytest -q
+```
+
+Runs without root or network: the watchdog and `quick_check.py` tests use mocks, and the DNS
+installer is exercised against a sandbox with fake `systemctl`/`dhcpcd`, including its rollback paths.
+CI runs the same suite (`.github/workflows/ci.yml`).
+
 ## License
 
 MIT — see [`LICENSE`](LICENSE).

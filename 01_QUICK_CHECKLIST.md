@@ -250,8 +250,12 @@ Two things this path gets right that the NetworkManager one doesn't have to thin
   `chown -R _dnscrypt-proxy:nogroup /var/cache/dnscrypt-proxy /var/log/dnscrypt-proxy`.
 
 `scripts/setup_encrypted_dns.sh` does the whole sequence non-interactively, verifies `127.0.2.1`
-answers *before* touching system DNS, and rolls itself back from `/root/dns-rollback-<stamp>/` if
-a real lookup fails after the switch.
+answers *before* touching system DNS, and rolls itself back from `/root/dns-rollback-<stamp>/` on
+**any** failing exit once it has started modifying anything (a failed `dnscrypt-proxy -check`, a
+failed probe, a failed final lookup, a signal) — a normal exit never restores. It restores
+`dhcpcd.conf`, `resolv.conf` and the original `dnscrypt-proxy.toml`; it does not uninstall the
+package. The config paths can be redirected with `BK_ROOT`, `TOML`, `DHCPCD_CONF` and
+`RESOLV_CONF`, which is how the tests run it against a sandbox.
 
 **What to expect from it, measured (Debian 13, 2026-09-13, gigabit PPPoE link):**
 
