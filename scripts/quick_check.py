@@ -502,6 +502,7 @@ def check_real_api_timings(target_url: str, attempts: int = 3) -> dict:
             "total_ms": None,
             "ok": False,
         }
+        active_sock = None
         try:
             # Phase 1: DNS
             t_dns_start = time.perf_counter()
@@ -511,7 +512,8 @@ def check_real_api_timings(target_url: str, attempts: int = 3) -> dict:
 
             # Phase 2: TCP Connect
             t_tcp_start = time.perf_counter()
-            sock = socket.create_connection((ip_addr, port), timeout=5.0)
+            sock = socket.create_connection((ip_addr, port), timeout=5.0)  # timeout also covers TLS/send/recv
+            active_sock = sock
             t_tcp_end = time.perf_counter()
             sample["tcp_ms"] = round((t_tcp_end - t_tcp_start) * 1000.0, 1)
 
@@ -519,11 +521,9 @@ def check_real_api_timings(target_url: str, attempts: int = 3) -> dict:
             if use_ssl and ssl_context:
                 t_tls_start = time.perf_counter()
                 ssock = ssl_context.wrap_socket(sock, server_hostname=host)
+                active_sock = ssock
                 t_tls_end = time.perf_counter()
                 sample["tls_ms"] = round((t_tls_end - t_tls_start) * 1000.0, 1)
-                active_sock = ssock
-            else:
-                active_sock = sock
 
             # Phase 4: HTTP Request / TTFB
             t_req_start = time.perf_counter()
@@ -537,7 +537,6 @@ def check_real_api_timings(target_url: str, attempts: int = 3) -> dict:
             # Drain remainder
             while data:
                 data = active_sock.recv(4096)
-            active_sock.close()
 
             sample["total_ms"] = round((time.perf_counter() - t0) * 1000.0, 1)
             sample["ok"] = True
@@ -548,6 +547,12 @@ def check_real_api_timings(target_url: str, attempts: int = 3) -> dict:
             sample["total_ms"] = round((time.perf_counter() - t0) * 1000.0, 1)
             result["samples"].append(sample)
             result["issues"].append(f"HTTP probe #{i+1} failed: {e}")
+        finally:
+            if active_sock is not None:
+                try:
+                    active_sock.close()
+                except OSError:
+                    pass
 
         time.sleep(0.5)
 
