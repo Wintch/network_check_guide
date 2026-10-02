@@ -97,18 +97,30 @@ If `time_namelookup` is consistently slow, or you're just deciding what to point
 at, the resolvers you'd reach for trade off latency against how much they (and anyone
 watching the wire) learn about every domain you touch. Roughly fastest-to-most-private:
 
+> **Scope and review date.** The "Typical latency" column is general, from memory, and **not
+> measured on this host** — region and PoP placement change it a lot (the measured numbers are
+> in §7, marked with their host and date). The privacy column was checked on **2026-10-02**
+> against each provider's own published policy, listed under the table; providers change
+> policies, so re-read them before relying on this. Where a claim could not be confirmed it is
+> marked *(unverified)*.
+
 | Resolver | Typical latency | Privacy trade-off |
 |---|---|---|
 | **Your ISP's default** | Usually lowest (topologically closest hop) | Worst: plaintext UDP/53 by default, ISP can log/sell/inject and is the easiest party to subpoena |
-| **Google `8.8.8.8`** | Very fast, huge anycast footprint | Google ties queries to your IP and retains them briefly as part of the same business that runs ads/analytics |
-| **Cloudflare `1.1.1.1`** | Fast — usually the lowest latency in independent benchmarks (DNSPerf) | Published, third-party-audited minimal-logging policy; supports DoH/DoT. Good default for most people |
-| **Quad9 `9.9.9.9`** | A few ms slower than Cloudflare in most regions | Swiss nonprofit, blocks known-malicious domains, minimal logging by design — better privacy stance than the big two |
-| **Mullvad DoH (`dns.mullvad.net`)** | Similar to Quad9, sometimes a bit slower (fewer PoPs) | No logging, privacy-first jurisdiction; best if you also tunnel through their VPN, since DNS and egress traffic never separate (no DNS-leak risk) |
+| **Google `8.8.8.8`** | Very fast, huge anycast footprint | Logs IP + queries temporarily (24-48 h, longer only for security/abuse), then keeps anonymized, location-level aggregates [^g] |
+| **Cloudflare `1.1.1.1`** | Fast; often among the lowest in public benchmarks such as DNSPerf *(unverified, varies by region)* | Deletes resolver logs within 25 h, truncates source IPs, keeps aggregates for Radar; states it is audited by a top-four accounting firm [^c]; supports DoH/DoT |
+| **Quad9 `9.9.9.9`** | Often a few ms slower than Cloudflare *(unverified, varies by region)* | Swiss foundation; states it does not retain client IPs (held in RAM only to answer) and keeps only aggregate counters; `9.9.9.9` blocks known-malicious domains, the unfiltered endpoint does not [^q] |
+| **Mullvad DoH (`dns.mullvad.net`)** | Similar to Quad9, sometimes a bit slower (fewer PoPs) *(unverified)* | Open to non-customers [^m]; its no-logging claim is *(unverified)* — the DNS help page does not state a logging policy, so check Mullvad's privacy policy; sensible if you also tunnel through their VPN so DNS and egress traffic stay together |
 | **DNS over Tor / random per-query resolver** | Real latency cost — tens to hundreds of ms extra | Only worth it against a well-resourced/state-level adversary; overkill for "keep an AI coding session responsive" |
 
+[^g]: https://developers.google.com/speed/public-dns/privacy
+[^c]: https://developers.cloudflare.com/1.1.1.1/privacy/public-dns-resolver/
+[^q]: https://quad9.net/privacy/policy/
+[^m]: https://mullvad.net/en/help/dns-over-https-and-dns-over-tls
+
 Practical recommendation for the low-latency use case this guide targets: **Cloudflare
-`1.1.1.1`** (plain or DoH) is the best default — it's rarely the slowest option in any
-region and doesn't log in a way tied to an ad business. If you'd rather not trust a US-based
+`1.1.1.1`** (plain or DoH) is a reasonable default — it is usually among the faster options and publishes a short
+retention policy (above); that is a judgement, not a measurement of your network. If you'd rather not trust a US-based
 company at all, **Quad9 `9.9.9.9`** or **Mullvad's DoH** cost only a handful of extra
 milliseconds and are not perceptible in interactive use. Avoid relying on your ISP's default
 resolver if you care about privacy at all — it's fast because it's unencrypted and
