@@ -1043,7 +1043,11 @@ def parse_args():
     p.add_argument("--dns-refresh-interval", type=float, default=120.0, help="seconds between DNS re-resolutions of the telemetry/malware lists (ad-tech IPs rotate often)")
     p.add_argument("--bandwidth-threshold-mbps", type=float, default=15.0, help="sustained throughput (Mbps) on an unclassified connection to flag it as unidentified high consumption (--mode malware/all)")
     p.add_argument("--bandwidth-streak-samples", type=int, default=3, help="consecutive samples above the bandwidth threshold before alerting")
-    return p.parse_args()
+    args = p.parse_args()
+    for flag in ("duration", "interval"):
+        if getattr(args, flag) <= 0:
+            p.error(f"--{flag} must be > 0")
+    return args
 
 
 def main():

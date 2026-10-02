@@ -611,7 +611,10 @@ Examples:
         action="store_true",
         help="Output results in JSON format only",
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.ping_count <= 0:
+        parser.error("--ping-count must be > 0")
+    return args
 
 
 def main():

@@ -109,7 +109,7 @@ python3 "$WORK"/dnsq.py 127.0.2.1 github.com || die "127.0.2.1 answered once but
 step "6/6  point the system at it"
 # `static` replaces the DHCP-supplied list outright. That is the point: a leftover second
 # nameserver is a plaintext fallback glibc will happily use whenever the first is slow.
-sed -i '/^static domain_name_servers=/d' /etc/dhcpcd.conf
+sed -i '/^[[:space:]]*static[[:space:]]\+domain_name_servers=/d' /etc/dhcpcd.conf
 printf '\n# encrypted DNS: dnscrypt-proxy (DoH) listens here -- see 01_QUICK_CHECKLIST.md section 7 Option B\nstatic domain_name_servers=127.0.2.1\n' >> /etc/dhcpcd.conf
 # -n rebinds without releasing the lease, so this does not drop the SSH session we are in.
 dhcpcd -n >/dev/null 2>&1
