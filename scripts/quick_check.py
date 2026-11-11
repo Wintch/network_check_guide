@@ -1,0 +1,835 @@
+#!/usr/bin/env python3
+"""quick_check.py - Automated Pre-Work Network Health Checklist (~30-90 seconds).
+
+Runs all essential checks from 01_QUICK_CHECKLIST.md, 03_WIRED_AND_GATEWAY.md,
+and 05_AI_WORKLOAD_AND_LATENCY.md in a single safe, non-destructive pass:
+  1. Primary interface link health (speed, duplex, carrier flaps, Wi-Fi stats)
+  2. Gateway reachability & high-resolution periodic gap detection (ping -D)
+  3. DNS resolution latency & stability (local vs remote resolver, local cache detection)
+  4. Path MTU & ICMP PMTUD black-hole check (detects 1500 vs 1492/PPPoE vs VPN)
+  5. Dual-stack IPv4/IPv6 sanity & public IP detection
+  6. Real HTTP/TLS handshake timing to target API (DNS, TCP, TLS, TTFB)
+  7. Final colorized triage report with pointers to specific guide files
+
+Safe, read-only: does not modify any routing, interface, or firewall configuration.
+Pure Python standard library (no pip packages required). Requires Python 3.10+
+(uses PEP 604 `X | None` type hints) — e.g. Debian 12+/Ubuntu 22.04+.
+"""
+
+import argparse
+import json
+import os
+import re
+import socket
+import ssl
+import subprocess
+import sys
+import threading
+import time
+from urllib.parse import urlparse
+
+# --- ANSI Terminal Color Support ---
+_USE_COLOR = sys.stdout.isatty() and not os.environ.get("NO_COLOR")
+_COLORS = {
+    "green": "\033[32m",
+    "yellow": "\033[33m",
+    "red": "\033[31m",
+    "cyan": "\033[36m",
+    "bold": "\033[1m",
+    "dim": "\033[2m",
+    "reset": "\033[0m",
+}
+
+
+def c(text: str, *styles: str) -> str:
+    if not _USE_COLOR:
+        return text
+    prefix = "".join(_COLORS.get(s, "") for s in styles)
+    return f"{prefix}{text}{_COLORS['reset']}"
+
+
+def badge(status: str) -> str:
+    if status == "OK":
+        return c("[  OK  ]", "green", "bold")
+    elif status == "WARN":
+        return c("[ WARN ]", "yellow", "bold")
+    elif status == "FAIL":
+        return c("[ FAIL ]", "red", "bold")
+    elif status == "INFO":
+        return c("[ INFO ]", "cyan", "bold")
+    return f"[{status:^6}]"
+
+
+# --- Network Detection Utilities ---
+
+
+def run_cmd(cmd: list[str], timeout: float = 5.0) -> tuple[int, str, str]:
+    """Execute command and return (returncode, stdout, stderr)."""
+    try:
+        proc = subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=timeout,
+        )
+        return proc.returncode, proc.stdout.strip(), proc.stderr.strip()
+    except subprocess.TimeoutExpired:
+        return -1, "", "Command timed out"
+    except FileNotFoundError:
+        return -2, "", f"Command not found: {cmd[0]}"
+    except Exception as e:
+        return -3, "", str(e)
+
+
+def detect_gateway_and_iface() -> tuple[str | None, str | None, str | None]:
+    """Detect default route IPv4 gateway, interface, and local IP."""
+    rc, out, _ = run_cmd(["ip", "route", "get", "8.8.8.8"])
+    if rc != 0 or not out:
+        return None, None, None
+
+    # Example: 8.8.8.8 via 192.168.1.1 dev enp5s0 src 192.168.1.10 uid 1000
+    gw_match = re.search(r"via\s+([0-9.]+)", out)
+    dev_match = re.search(r"dev\s+([a-zA-Z0-9_.-]+)", out)
+    src_match = re.search(r"src\s+([0-9.]+)", out)
+
+    gw = gw_match.group(1) if gw_match else None
+    dev = dev_match.group(1) if dev_match else None
+    src = src_match.group(1) if src_match else None
+    return gw, dev, src
+
+
+def detect_ipv6_gateway() -> tuple[str | None, str | None]:
+    """Detect default IPv6 route gateway and dev if available."""
+    rc, out, _ = run_cmd(["ip", "-6", "route", "get", "2001:4860:4860::8888"])
+    if rc != 0 or not out:
+        return None, None
+    gw_match = re.search(r"via\s+([0-9a-fA-F:]+)", out)
+    dev_match = re.search(r"dev\s+([a-zA-Z0-9_.-]+)", out)
+    gw = gw_match.group(1) if gw_match else None
+    dev = dev_match.group(1) if dev_match else None
+    return gw, dev
+
+
+def get_public_ip(ipv6: bool = False, timeout: float = 3.0) -> str | None:
+    """Fetch public IP via external service, trying a second one if the first fails."""
+    import urllib.request
+
+    hosts = ("api64.ipify.org", "ipv6.icanhazip.com") if ipv6 else (
+        "api.ipify.org",
+        "ipv4.icanhazip.com",
+    )
+    for host in hosts:
+        try:
+            req = urllib.request.Request(
+                f"https://{host}", headers={"User-Agent": "quick_check/1.0"}
+            )
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return resp.read().decode("utf-8").strip()
+        except Exception:
+            continue
+    return None
+
+
+# --- Diagnostic Checks ---
+
+
+def check_interface(iface: str) -> dict:
+    """Check physical/wireless interface health."""
+    sys_net = f"/sys/class/net/{iface}"
+    result = {
+        "iface": iface,
+        "is_up": False,
+        "speed": None,
+        "duplex": None,
+        "carrier_flaps": 0,
+        "is_wifi": False,
+        "wifi_info": {},
+        "eee_enabled": None,
+        "issues": [],
+        "warnings": [],
+    }
+
+    if not os.path.exists(sys_net):
+        result["issues"].append(f"Interface {iface} not found in sysfs")
+        return result
+
+    # Operstate
+    oper_path = os.path.join(sys_net, "operstate")
+    if os.path.exists(oper_path):
+        with open(oper_path, "r") as f:
+            state = f.read().strip()
+            result["is_up"] = (state == "up")
+            if not result["is_up"]:
+                result["issues"].append(f"Link operstate is '{state}' (not 'up')")
+
+    # Carrier changes
+    flaps_path = os.path.join(sys_net, "carrier_changes")
+    if os.path.exists(flaps_path):
+        try:
+            with open(flaps_path, "r") as f:
+                result["carrier_flaps"] = int(f.read().strip())
+                if result["carrier_flaps"] > 10:
+                    result["warnings"].append(
+                        f"High carrier flap count: {result['carrier_flaps']} flaps since boot"
+                    )
+        except ValueError:
+            pass
+
+    # Speed & Duplex
+    speed_path = os.path.join(sys_net, "speed")
+    if os.path.exists(speed_path):
+        try:
+            with open(speed_path, "r") as f:
+                result["speed"] = int(f.read().strip())
+                if result["speed"] == 100:
+                    result["warnings"].append(
+                        "Negotiated link speed is 100 Mbps (possible degraded gigabit cable/switch port - see 03_WIRED_AND_GATEWAY.md)"
+                    )
+                elif result["speed"] < 100 and result["speed"] > 0:
+                    result["warnings"].append(f"Very low negotiated link speed: {result['speed']} Mbps")
+        except (ValueError, OSError):
+            pass
+
+    duplex_path = os.path.join(sys_net, "duplex")
+    if os.path.exists(duplex_path):
+        try:
+            with open(duplex_path, "r") as f:
+                result["duplex"] = f.read().strip()
+                if result["duplex"] == "half":
+                    result["issues"].append("Interface negotiated HALF-DUPLEX (severe collision bottleneck)")
+        except OSError:
+            pass
+
+    # Wi-Fi check
+    if os.path.exists(os.path.join(sys_net, "wireless")) or os.path.exists(os.path.join(sys_net, "phy80211")):
+        result["is_wifi"] = True
+        rc, out, _ = run_cmd(["iw", "dev", iface, "link"])
+        if rc == 0 and "Connected to" in out:
+            sig_m = re.search(r"signal:\s*(-?[0-9]+)\s*dBm", out)
+            rate_m = re.search(r"tx bitrate:\s*([0-9.]+\s*MBit/s)", out)
+            if sig_m:
+                sig = int(sig_m.group(1))
+                result["wifi_info"]["signal_dbm"] = sig
+                if sig < -72:
+                    result["warnings"].append(f"Wi-Fi signal weak ({sig} dBm) - high risk of retries/drops")
+            if rate_m:
+                result["wifi_info"]["tx_bitrate"] = rate_m.group(1)
+
+        # Station dump for retries
+        rc_sd, out_sd, _ = run_cmd(["iw", "dev", iface, "station", "dump"])
+        if rc_sd == 0:
+            retries_m = re.search(r"tx retries:\s*([0-9]+)", out_sd)
+            failed_m = re.search(r"tx failed:\s*([0-9]+)", out_sd)
+            if retries_m:
+                result["wifi_info"]["tx_retries"] = int(retries_m.group(1))
+            if failed_m:
+                result["wifi_info"]["tx_failed"] = int(failed_m.group(1))
+
+    # EEE (Energy Efficient Ethernet) check via ethtool
+    rc_et, out_et, _ = run_cmd(["ethtool", "--show-eee", iface])
+    # ethtool prints "enabled - active" when negotiated with the link partner and
+    # "enabled - inactive" when enabled locally but not in effect: only the former matters.
+    if rc_et == 0 and re.search(r"EEE status:\s*enabled\s*-\s*active", out_et):
+        result["eee_enabled"] = True
+        result["warnings"].append(
+            "Energy Efficient Ethernet (802.3az) is active - can induce micro-sleep latency spikes on some NICs"
+        )
+
+    return result
+
+
+def check_gateway_pings(gateway_ip: str, count: int = 25) -> dict:
+    """Ping default gateway looking for latency, loss, and periodic gaps."""
+    result = {
+        "gateway": gateway_ip,
+        "transmitted": count,
+        "received": 0,
+        "loss_pct": None,       # None = could not be measured (see "measured")
+        "measured": False,
+        "rtt_min": None,
+        "rtt_avg": None,
+        "rtt_max": None,
+        "rtt_mdev": None,
+        "gaps": [],
+        "periodic_interval": None,
+        "issues": [],
+        "warnings": [],
+    }
+
+    # Run ping with -D (timestamps), interval 1s, count
+    cmd = ["ping", "-D", "-i", "1", "-c", str(count), "-W", "2", gateway_ip]
+    rc, out, err = run_cmd(cmd, timeout=count + 5.0)
+
+    timestamps = []
+    for line in out.splitlines():
+        # Match timestamp prefix e.g. [1726267890.123456]
+        m = re.match(r"^\[([0-9.]+)\].*bytes from", line)
+        if m:
+            timestamps.append(float(m.group(1)))
+
+    result["received"] = len(timestamps)
+    # ping missing / timed out / produced nothing we can read (not even its summary) is a
+    # measurement failure, not 100% loss. Real loss still prints the "packets transmitted" line.
+    summary_m = re.search(r"(\d+) packets transmitted, (\d+) (?:packets )?received", out)
+    if rc in (-1, -2) or (not timestamps and not summary_m):
+        reason = err or f"ping exited rc={rc} with unparseable output"
+        result["issues"].append(f"Gateway ping could not be measured: {reason}")
+        return result
+    result["measured"] = True
+    result["loss_pct"] = round(((count - len(timestamps)) / count) * 100.0, 1)
+
+    # Parse ping summary line
+    # rtt min/avg/max/mdev = 0.456/0.789/1.234/0.120 ms
+    rtt_m = re.search(r"rtt min/avg/max/mdev = ([0-9.]+)/([0-9.]+)/([0-9.]+)/([0-9.]+)", out)
+    if rtt_m:
+        result["rtt_min"] = float(rtt_m.group(1))
+        result["rtt_avg"] = float(rtt_m.group(2))
+        result["rtt_max"] = float(rtt_m.group(3))
+        result["rtt_mdev"] = float(rtt_m.group(4))
+
+    # Calculate gaps (> 1.5 seconds between received packets, same threshold as net_watchdog.py)
+    for i in range(1, len(timestamps)):
+        delta = timestamps[i] - timestamps[i - 1]
+        if delta > 1.5:
+            result["gaps"].append(round(delta, 2))
+
+    if result["loss_pct"] > 0:
+        if result["loss_pct"] > 5.0:
+            result["issues"].append(
+                f"Gateway packet loss is {result['loss_pct']}% ({count - len(timestamps)}/{count} lost)"
+            )
+        else:
+            result["warnings"].append(f"Gateway packet loss: {result['loss_pct']}%")
+
+    if result["gaps"]:
+        gap_desc = ", ".join(f"{g}s" for g in result["gaps"][:5])
+        if len(result["gaps"]) >= 2:
+            # Several gaps in one run: the signature described in the periodic-outage case study
+            result["issues"].append(
+                f"DETECTED MULTIPLE GATEWAY PING GAPS: [{gap_desc}]. Typical of a watchdog loop / NIC reset / DFS switch (see 03_WIRED_AND_GATEWAY.md & 06_CASE_STUDY_PERIODIC_OUTAGE.md)"
+            )
+        else:
+            result["warnings"].append(f"Transient gateway ping gap observed: {gap_desc}")
+
+    if result["rtt_avg"] and result["rtt_avg"] > 15.0:
+        result["warnings"].append(
+            f"High first-hop gateway latency: avg={result['rtt_avg']}ms (wired should be <1ms, Wi-Fi <5ms)"
+        )
+
+    return result
+
+
+def check_local_dns_cache(target_host: str, cold_ms: float | None) -> dict:
+    """Detect whether a local caching resolver is in front of us.
+
+    Two independent signals:
+      1. /etc/resolv.conf pointing at a loopback address (127.0.0.1, 127.0.0.53, ::1)
+         strongly suggests a local stub/cache (systemd-resolved, dnsmasq, unbound).
+      2. Re-resolving the same target right after the cold lookup: a real cache
+         collapses this to ~0ms; with no cache it stays close to the cold-lookup time.
+    """
+    result = {
+        "nameserver": None,
+        "loopback_nameserver": False,
+        "warm_ms": None,
+        "cache_detected": False,
+        "warnings": [],
+    }
+
+    try:
+        with open("/etc/resolv.conf", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith("nameserver"):
+                    ns = line.split()[1]
+                    result["nameserver"] = ns
+                    if ns.startswith("127.") or ns == "::1":
+                        result["loopback_nameserver"] = True
+                    break
+    except OSError:
+        pass
+
+    t0 = time.perf_counter()
+    try:
+        socket.getaddrinfo(target_host, 443, proto=socket.IPPROTO_TCP)
+        result["warm_ms"] = round((time.perf_counter() - t0) * 1000.0, 1)
+    except Exception:
+        pass
+
+    # A cache hit should be near-instant regardless of what the cold lookup cost.
+    if result["warm_ms"] is not None and result["warm_ms"] < 2.0:
+        result["cache_detected"] = True
+    elif result["loopback_nameserver"]:
+        # Loopback resolver but warm lookup wasn't fast — trust the signal anyway,
+        # some setups (e.g. validating resolvers) add a few ms even on cache hits.
+        result["cache_detected"] = True
+
+    if not result["cache_detected"] and cold_ms is not None and cold_ms > 15.0:
+        result["warnings"].append(
+            f"No local DNS cache detected (nameserver={result['nameserver']!r}, "
+            f"repeat lookup still took {result['warm_ms']}ms) — every lookup, even "
+            "repeats, pays full resolver round-trip latency. See "
+            "01_QUICK_CHECKLIST.md section 6 to set up dnsmasq or dnscrypt-proxy (encrypted)."
+        )
+
+    return result
+
+
+def check_dns_health(target_host: str) -> dict:
+    """Measure DNS resolution speed and stability across multiple domains."""
+    domains = [
+        ("target", target_host),
+        ("baseline_1", "google.com"),
+        ("baseline_2", "cloudflare.com"),
+    ]
+    result = {
+        "target_host": target_host,
+        "resolutions": {},
+        "target_ms": None,
+        "cache": None,
+        "issues": [],
+        "warnings": [],
+    }
+
+    for label, domain in domains:
+        t0 = time.perf_counter()
+        try:
+            # Force resolution
+            info = socket.getaddrinfo(domain, 443, proto=socket.IPPROTO_TCP)
+            elapsed_ms = round((time.perf_counter() - t0) * 1000.0, 1)
+            ips = list({item[4][0] for item in info})
+            result["resolutions"][domain] = {"elapsed_ms": elapsed_ms, "ips": ips, "ok": True}
+            if label == "target":
+                result["target_ms"] = elapsed_ms
+        except Exception as e:
+            elapsed_ms = round((time.perf_counter() - t0) * 1000.0, 1)
+            result["resolutions"][domain] = {"elapsed_ms": elapsed_ms, "error": str(e), "ok": False}
+            result["issues"].append(f"DNS lookup failed for {domain}: {e}")
+
+    if result["target_ms"] is not None:
+        if result["target_ms"] > 250.0:
+            result["warnings"].append(
+                f"Slow DNS resolution for {target_host}: {result['target_ms']}ms (adds perceptible delay to new API sessions)"
+            )
+
+    result["cache"] = check_local_dns_cache(target_host, result["target_ms"])
+    result["warnings"].extend(result["cache"]["warnings"])
+
+    return result
+
+
+# ping wording when a DF probe is rejected instead of silently dropped: older iputils print
+# "sendmsg: Message too long", newer ones "local error: message too long, mtu=1492", and a
+# router answers with ICMP "Frag needed and DF set". Matched case-insensitively.
+_SIZE_REJECTION_MARKERS = ("message too long", "local error", "frag needed", "sendmsg")
+
+
+def _is_explicit_size_rejection(text: str) -> bool:
+    lowered = text.lower()
+    return any(marker in lowered for marker in _SIZE_REJECTION_MARKERS)
+
+
+def check_path_mtu(target_ip: str = "8.8.8.8") -> dict:
+    """Probe Path MTU to detect fragmentation limits and PMTUD black holes."""
+    result = {
+        "target": target_ip,
+        "max_working_payload": None,
+        "effective_mtu": None,
+        "is_standard_1500": False,
+        "is_pppoe_1492": False,
+        "is_vpn_or_tunnel": False,
+        "issues": [],
+        "warnings": [],
+    }
+
+    # Payload = MTU - 20 (IPv4 header) - 8 (ICMP header) = MTU - 28.
+    def probe(payload):
+        """True if a DF ping of this payload size gets answered. Local-MTU rejections
+        ("sendmsg: Message too long", or "local error: message too long, mtu=1492" in
+        newer iputils) and ICMP "frag needed" count as not fitting; only an unanswered
+        packet that was not rejected is a silent black-hole signature."""
+        rc, out, err = run_cmd(["ping", "-M", "do", "-s", str(payload), "-c", "2", "-W", "2", target_ip])
+        combined = out + "\n" + err
+        if rc == 0 and "2 received" in out:
+            return True
+        if rc != 0 and "100% packet loss" in combined and not _is_explicit_size_rejection(combined):
+            nonlocal silent_drops
+            silent_drops += 1
+        return False
+
+    silent_drops = 0
+    HI, LO = 1472, 1200          # 1500 and 1228: the largest and smallest sizes worth reporting
+    working_mtu = None
+    if probe(HI):
+        working_mtu = HI + 28
+    elif probe(LO):
+        # Binary search the largest payload that works: lo works, hi fails. Assumes the path is
+        # monotonic (anything smaller than a working size also works), which holds for MTU.
+        lo, hi = LO, HI
+        while hi - lo > 1:
+            mid = (lo + hi) // 2
+            if probe(mid):
+                lo = mid
+            else:
+                hi = mid
+        working_mtu = lo + 28
+    if working_mtu is not None:
+        result["max_working_payload"] = working_mtu - 28
+        result["effective_mtu"] = working_mtu
+    if silent_drops:
+        result["warnings"].append(
+            f"{silent_drops} oversized DF probe(s) were dropped silently (no ICMP reply, no local "
+            "rejection): possible ICMP black-hole router filtering fragmentation notifications"
+        )
+
+    if working_mtu == 1500:
+        result["is_standard_1500"] = True
+    elif working_mtu == 1492:
+        result["is_pppoe_1492"] = True
+        result["warnings"].append(
+            "Path MTU is 1492 (typical of PPPoE fiber/DSL). Verify MSS Clamping is active if large HTTP uploads or git push stall."
+        )
+    elif working_mtu and working_mtu < 1492:
+        result["is_vpn_or_tunnel"] = True
+        result["warnings"].append(
+            f"Path MTU is {working_mtu} (VPN, overlay, or tunnel overhead). Ensure client/wireguard MTU matches."
+        )
+    elif working_mtu and working_mtu < 1500:
+        result["warnings"].append(
+            f"Path MTU is {working_mtu}, an unusual value between PPPoE (1492) and Ethernet (1500). Check for a mis-set interface/tunnel MTU."
+        )
+    elif working_mtu is None:
+        result["issues"].append(
+            "Could not determine Path MTU; even 1200-byte ICMP payloads with DF failed to reach target."
+        )
+
+    return result
+
+
+def resolve_with_timeout(host: str, port: int, family: int, timeout: float = 3.0) -> str | None:
+    """First address of `host` for one IP family, or None if it has none or resolution exceeds
+    `timeout`. getaddrinfo has no timeout of its own, so run it in a daemon thread."""
+    box: list = []
+
+    def work():
+        try:
+            box.append(socket.getaddrinfo(host, port, family, socket.SOCK_STREAM)[0][4][0])
+        except OSError:
+            box.append(None)
+
+    t = threading.Thread(target=work, daemon=True)
+    t.start()
+    t.join(timeout)
+    return box[0] if box else None
+
+
+def check_real_api_timings(target_url: str, attempts: int = 3, family: int = socket.AF_INET) -> dict:
+    """Measure per-phase timing (DNS, TCP, TLS, TTFB, Total) to real API endpoint over one
+    IP family (AF_INET or AF_INET6). When the family is unusable (no AAAA record, no route,
+    resolution timeout) every sample fails and `available` is False."""
+    parsed = urlparse(target_url)
+    host = parsed.hostname or target_url
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    use_ssl = (parsed.scheme == "https" or port == 443)
+
+    result = {
+        "url": target_url,
+        "family": "IPv6" if family == socket.AF_INET6 else "IPv4",
+        "available": False,
+        "host": host,
+        "port": port,
+        "samples": [],
+        "avg_total_ms": None,
+        "avg_ttfb_ms": None,
+        "issues": [],
+        "warnings": [],
+    }
+
+    ssl_context = ssl.create_default_context() if use_ssl else None
+
+    for i in range(attempts):
+        t0 = time.perf_counter()
+        sample = {
+            "dns_ms": None,
+            "tcp_ms": None,
+            "tls_ms": None,
+            "ttfb_ms": None,
+            "total_ms": None,
+            "ok": False,
+        }
+        active_sock = None
+        try:
+            # Phase 1: DNS
+            t_dns_start = time.perf_counter()
+            ip_addr = resolve_with_timeout(host, port, family)
+            if ip_addr is None:
+                raise OSError(f"no {result['family']} address (no record, or resolution timed out)")
+            t_dns_end = time.perf_counter()
+            sample["dns_ms"] = round((t_dns_end - t_dns_start) * 1000.0, 1)
+
+            # Phase 2: TCP Connect
+            t_tcp_start = time.perf_counter()
+            sock = socket.create_connection((ip_addr, port), timeout=5.0)  # timeout also covers TLS/send/recv
+            active_sock = sock
+            t_tcp_end = time.perf_counter()
+            sample["tcp_ms"] = round((t_tcp_end - t_tcp_start) * 1000.0, 1)
+
+            # Phase 3: TLS Handshake (if HTTPS)
+            if use_ssl and ssl_context:
+                t_tls_start = time.perf_counter()
+                ssock = ssl_context.wrap_socket(sock, server_hostname=host)
+                active_sock = ssock
+                t_tls_end = time.perf_counter()
+                sample["tls_ms"] = round((t_tls_end - t_tls_start) * 1000.0, 1)
+
+            # Phase 4: HTTP Request / TTFB
+            t_req_start = time.perf_counter()
+            req = f"GET {parsed.path or '/'} HTTP/1.1\r\nHost: {host}\r\nUser-Agent: quick_check/1.0\r\nConnection: close\r\n\r\n"
+            active_sock.sendall(req.encode("utf-8"))
+            # Read first chunk
+            data = active_sock.recv(1024)
+            t_ttfb_end = time.perf_counter()
+            sample["ttfb_ms"] = round((t_ttfb_end - t_req_start) * 1000.0, 1)
+
+            # Drain remainder
+            while data:
+                data = active_sock.recv(4096)
+
+            sample["total_ms"] = round((time.perf_counter() - t0) * 1000.0, 1)
+            sample["ok"] = True
+            result["samples"].append(sample)
+
+        except Exception as e:
+            sample["error"] = str(e)
+            sample["total_ms"] = round((time.perf_counter() - t0) * 1000.0, 1)
+            result["samples"].append(sample)
+            result["issues"].append(f"HTTP probe #{i+1} failed: {e}")
+        finally:
+            if active_sock is not None:
+                try:
+                    active_sock.close()
+                except OSError:
+                    pass
+
+        time.sleep(0.5)
+
+    result["available"] = any(s["ok"] for s in result["samples"])
+    valid_totals = [s["total_ms"] for s in result["samples"] if s["ok"]]
+    valid_ttfbs = [s["ttfb_ms"] for s in result["samples"] if s["ok"] and s["ttfb_ms"] is not None]
+    if valid_totals:
+        result["avg_total_ms"] = round(sum(valid_totals) / len(valid_totals), 1)
+    if valid_ttfbs:
+        result["avg_ttfb_ms"] = round(sum(valid_ttfbs) / len(valid_ttfbs), 1)
+
+    return result
+
+
+# --- Main CLI Flow & Display ---
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Automated Pre-Work Network Health Checklist (~30-90 seconds)",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  python3 scripts/quick_check.py
+  python3 scripts/quick_check.py --host api.anthropic.com --full
+  python3 scripts/quick_check.py --ping-count 30 --json
+        """,
+    )
+    parser.add_argument(
+        "--host",
+        default="api.anthropic.com",
+        help="Target API hostname to test (default: api.anthropic.com)",
+    )
+    parser.add_argument(
+        "--gateway",
+        default=None,
+        help="Gateway IP to test (default: auto-detected via default route)",
+    )
+    parser.add_argument(
+        "--iface",
+        default=None,
+        help="Network interface to test (default: auto-detected)",
+    )
+    parser.add_argument(
+        "--ping-count",
+        type=int,
+        default=20,
+        help="Number of gateway ping samples (default: 20, ~20s)",
+    )
+    parser.add_argument(
+        "--full",
+        action="store_true",
+        help="Run an extended 60-packet ping test for subtle periodic gaps",
+    )
+    parser.add_argument(
+        "--no-color",
+        action="store_true",
+        help="Disable ANSI terminal colors",
+    )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output results in JSON format only",
+    )
+    args = parser.parse_args()
+    if args.ping_count <= 0:
+        parser.error("--ping-count must be > 0")
+    return args
+
+
+def main():
+    args = parse_args()
+    if args.no_color:
+        global _USE_COLOR
+        _USE_COLOR = False
+
+    ping_count = 60 if args.full else args.ping_count
+
+    # 1. Detection
+    auto_gw, auto_iface, auto_src = detect_gateway_and_iface()
+    gw = args.gateway or auto_gw
+    iface = args.iface or auto_iface
+    ipv6_gw, ipv6_iface = detect_ipv6_gateway()
+
+    if not args.json:
+        print(c("═" * 68, "bold", "cyan"))
+        print(c("  Network Health Quick-Check (Pre-Work Checklist)", "bold"))
+        print(c("═" * 68, "bold", "cyan"))
+        print(f" Target API host:      {c(args.host, 'bold')}")
+        print(f" Default gateway:      {c(str(gw), 'bold')}")
+        print(f" Primary interface:    {c(str(iface), 'bold')} (Local IP: {auto_src})")
+        print(f" IPv6 Dual-Stack:      {'Active (' + str(ipv6_gw) + ')' if ipv6_gw else 'Disabled / No IPv6 route'}")
+        print(c("─" * 68, "dim"))
+        print(c(" Running diagnostics (~30-90 seconds)...", "dim"))
+
+    # Execute all checks
+    iface_report = check_interface(iface) if iface else {"issues": ["No interface detected"], "warnings": []}
+    gw_report = check_gateway_pings(gw, count=ping_count) if gw else {"issues": ["No gateway detected"], "warnings": []}
+    dns_report = check_dns_health(args.host)
+    mtu_report = check_path_mtu("8.8.8.8")
+    api_report = check_real_api_timings(f"https://{args.host}")
+    api6_report = check_real_api_timings(f"https://{args.host}", attempts=1, family=socket.AF_INET6)
+    if not api6_report["available"]:
+        # IPv6 being unavailable is a fact about the network, not a fault: report it, don't fail on it.
+        api6_report["warnings"].append(f"IPv6 path to {args.host} not usable: {api6_report['samples'][0].get('error')}")
+        api6_report["issues"] = []
+    public_ip4 = get_public_ip(ipv6=False)
+
+    all_issues = iface_report.get("issues", []) + gw_report.get("issues", []) + dns_report.get("issues", []) + mtu_report.get("issues", []) + api_report.get("issues", [])
+    all_warnings = iface_report.get("warnings", []) + gw_report.get("warnings", []) + dns_report.get("warnings", []) + mtu_report.get("warnings", []) + api_report.get("warnings", [])
+
+    if args.json:
+        output = {
+            "target_host": args.host,
+            "gateway": gw,
+            "iface": iface,
+            "public_ipv4": public_ip4,
+            "status": "FAIL" if all_issues else ("WARN" if all_warnings else "OK"),
+            "interface": iface_report,
+            "gateway_ping": gw_report,
+            "dns": dns_report,
+            "mtu": mtu_report,
+            "api_timing": api_report,
+            "api_timing_ipv6": api6_report,
+            "issues": all_issues,
+            "warnings": all_warnings,
+        }
+        print(json.dumps(output, indent=2))
+        sys.exit(1 if all_issues else 0)
+
+    # Human-readable report
+    print("\n" + c("1. Link & Physical Layer", "bold"))
+    if iface_report.get("is_up"):
+        speed_str = f"{iface_report['speed']} Mbps" if iface_report['speed'] else "unknown speed"
+        flaps_str = f"{iface_report['carrier_flaps']} carrier flaps"
+        if iface_report.get("is_wifi"):
+            wf = iface_report.get("wifi_info", {})
+            print(f"  {badge('OK')} Interface {iface} is UP (Wi-Fi, signal={wf.get('signal_dbm')}dBm, rate={wf.get('tx_bitrate')})")
+        else:
+            print(f"  {badge('OK')} Interface {iface} is UP ({speed_str}, {flaps_str})")
+    else:
+        print(f"  {badge('FAIL')} Interface {iface} is DOWN or degraded")
+
+    print("\n" + c("2. Gateway Reachability & Gap Analysis", "bold"))
+    if gw_report.get("measured") is False and gw_report.get("gateway"):
+        print(f"  {badge('FAIL')} Gateway {gw}: ping could not be measured (not the same as 100% loss)")
+    elif gw_report.get("loss_pct", 100.0) == 0.0 and not gw_report.get("gaps"):
+        print(f"  {badge('OK')} Gateway {gw}: 0% loss ({gw_report['received']}/{gw_report['transmitted']}), avg RTT: {gw_report.get('rtt_avg')}ms, no gaps")
+    elif gw_report.get("gaps") and len(gw_report["gaps"]) >= 2:
+        print(f"  {badge('FAIL')} Periodic gateway gaps detected: {gw_report['gaps']}s!")
+    elif gw_report.get("loss_pct", 0) > 0:
+        print(f"  {badge('WARN')} Gateway packet loss: {gw_report['loss_pct']}%, gaps: {gw_report.get('gaps') or 'none'}")
+    else:
+        print(f"  {badge('INFO')} Gateway {gw}: avg RTT {gw_report.get('rtt_avg')}ms")
+
+    print("\n" + c("3. DNS Resolution Health", "bold"))
+    if dns_report.get("target_ms") is not None and dns_report["target_ms"] < 250:
+        print(f"  {badge('OK')} DNS lookup for {args.host}: {dns_report['target_ms']}ms")
+    elif dns_report.get("target_ms") is not None:
+        print(f"  {badge('WARN')} DNS lookup for {args.host} slow: {dns_report['target_ms']}ms")
+    else:
+        print(f"  {badge('FAIL')} DNS resolution failed")
+
+    cache = dns_report.get("cache") or {}
+    if cache.get("cache_detected"):
+        print(f"  {badge('OK')} Local DNS cache active (nameserver={cache.get('nameserver')}, repeat lookup={cache.get('warm_ms')}ms)")
+    elif cache.get("nameserver") is not None:
+        print(f"  {badge('WARN')} No local DNS cache (nameserver={cache.get('nameserver')}, repeat lookup={cache.get('warm_ms')}ms) — see 01_QUICK_CHECKLIST.md section 6")
+
+    print("\n" + c("4. Path MTU & Black Hole Check", "bold"))
+    if mtu_report.get("is_standard_1500"):
+        print(f"  {badge('OK')} Path MTU is 1500 (Standard Ethernet, 1472-byte ICMP payload OK)")
+    elif mtu_report.get("is_pppoe_1492"):
+        print(f"  {badge('INFO')} Path MTU is 1492 (PPPoE / Fiber link - ICMP payload 1464 OK)")
+    elif mtu_report.get("effective_mtu"):
+        print(f"  {badge('WARN')} Path MTU is reduced to {mtu_report['effective_mtu']} (VPN or Tunnel)")
+    else:
+        print(f"  {badge('FAIL')} Path MTU check failed")
+
+    print("\n" + c("5. Real API Handshake & TTFB (End-to-End)", "bold"))
+    if api_report.get("avg_total_ms"):
+        s0 = api_report["samples"][0] if api_report["samples"] else {}
+        print(f"  {badge('OK')} https://{args.host}: connect={s0.get('tcp_ms')}ms tls={s0.get('tls_ms')}ms ttfb={s0.get('ttfb_ms')}ms total={api_report['avg_total_ms']}ms")
+    else:
+        print(f"  {badge('FAIL')} Could not establish HTTPS connection to {args.host}")
+
+    if api6_report.get("available"):
+        s6 = api6_report["samples"][0]
+        print(f"  {badge('OK')} IPv6 https://{args.host}: connect={s6.get('tcp_ms')}ms tls={s6.get('tls_ms')}ms ttfb={s6.get('ttfb_ms')}ms")
+    else:
+        print(f"  {badge('INFO')} IPv6 not usable for {args.host} (IPv4 results above are the only path measured)")
+
+    if public_ip4:
+        print(f"  {badge('INFO')} Public IPv4: {public_ip4}")
+
+    # Verdict
+    print("\n" + c("═" * 68, "bold", "cyan"))
+    if not all_issues and not all_warnings:
+        print(f"  {c('✔ ALL CLEAR', 'green', 'bold')} — Network is in prime condition for real work.")
+        print("  Low first-hop latency, no gaps, healthy DNS, standard MTU.")
+    elif all_issues:
+        print(f"  {c('✖ ISSUES DETECTED', 'red', 'bold')} — Review findings before starting work:")
+        for iss in all_issues:
+            print(f"    • {c(iss, 'red')}")
+        print("\n  Recommended next action:")
+        if any("gaps" in iss.lower() or "watchdog" in iss.lower() for iss in all_issues):
+            print("    → See 03_WIRED_AND_GATEWAY.md §2 and 06_CASE_STUDY_PERIODIC_OUTAGE.md")
+        elif any("dns" in iss.lower() for iss in all_issues):
+            print("    → Check local DNS resolver / Pi-hole / router DNS status")
+        else:
+            print("    → Consult relevant section in the Network Health Guide")
+    else:
+        print(f"  {c('⚠ MINOR WARNINGS', 'yellow', 'bold')} — Network usable, but keep in mind:")
+        for w in all_warnings:
+            print(f"    • {c(w, 'yellow')}")
+    print(c("═" * 68, "bold", "cyan"))
+
+    sys.exit(1 if all_issues else 0)
+
+
+if __name__ == "__main__":
+    main()

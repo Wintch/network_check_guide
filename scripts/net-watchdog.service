@@ -1,0 +1,21 @@
+# User unit: install to ~/.config/systemd/user/ and manage with `systemctl --user`.
+# (network-online.target is a system-level target and cannot be ordered against from
+# a user manager, so there is no After=/Wants= for it -- the watchdog retries DNS
+# for --hosts while it runs, so starting a little before the network is fine.)
+[Unit]
+Description=Network health watchdog (bounded diagnostic run)
+
+[Service]
+Type=oneshot
+# WHERE THE REPO LIVES: change NCG_DIR to wherever you cloned this repository
+# (%h expands to your home directory). Nothing else in this unit depends on it.
+Environment=NCG_DIR=%h/network_check_guide
+# Adjust --hosts to whatever long-lived service you actually care about
+# (an API host, a work VPN endpoint, etc.) -- see 05_AI_WORKLOAD_AND_LATENCY.md.
+# Add --capture-on-anomaly only after granting tcpdump capture permissions,
+# see 09_BACKGROUND_WATCHDOG.md.
+ExecStart=/usr/bin/python3 ${NCG_DIR}/scripts/net_watchdog.py \
+    --duration 300 \
+    --hosts api.example.com
+Nice=10
+IOSchedulingClass=idle

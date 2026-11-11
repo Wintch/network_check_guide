@@ -1,0 +1,27 @@
+name: ci
+on: [push, pull_request]
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.10 is the documented minimum (PEP 604 type hints); 3.12 is current.
+        python-version: ["3.10", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: python -m py_compile scripts/net_watchdog.py scripts/quick_check.py
+      - run: bash -n scripts/setup_encrypted_dns.sh
+      - run: pip install pytest pyflakes
+      - run: python -m pyflakes scripts tests
+      - run: pytest -q
+
+  shellcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # shellcheck is preinstalled on ubuntu-latest runners
+      - run: shellcheck --severity=warning scripts/setup_encrypted_dns.sh

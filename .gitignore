@@ -1,0 +1,18 @@
+# Allowlist: ignore everything, then re-allow only what belongs in the repo.
+*
+!*/
+!.gitignore
+!LICENSE
+!*.md
+!*.py
+!*.sh
+!*.service
+!*.timer
+!.github/workflows/*.yml
+!scripts/*.example.txt
+
+# Re-deny generated and local-only files (these must come last).
+__pycache__/
+*.pyc
+local-notes/
+*.log

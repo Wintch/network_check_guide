@@ -1,0 +1,70 @@
+# Example --telemetry-domains-file for net_watchdog.py --mode telemetry/all.
+#
+# One domain per line, '#' starts a comment. This file is ADDED to the
+# built-in list in the script (DEFAULT_TELEMETRY_DOMAINS) -- the first
+# section below is already in that built-in list, repeated here so this
+# file stands on its own as a readable reference/template.
+#
+# Matching note: the watchdog resolves (A + AAAA) only the names listed here,
+# so "conviva.com" does NOT cover "<device-hash>.cws.conviva.com". List
+# concrete subdomains you have seen in your own traffic, or run with
+# --dns-log <your resolver's query log> to suffix-match every queried name.
+#
+# Usage:
+#   python3 net_watchdog.py --mode telemetry --telemetry-domains-file telemetry_domains.example.txt
+
+# -- Example endpoints reported for a smart-TV channel app -------------
+# See 12_SECURITY_AND_PARASITIC_TRAFFIC.md section 1 for what each one
+# does and when it fires.
+googlesyndication.com
+pagead2.googlesyndication.com
+doubleclick.net
+securepubads.g.doubleclick.net
+googleads.g.doubleclick.net
+imasdk.googleapis.com
+brightline.tv
+adstk.io
+conviva.com
+axiom.co
+
+# -- Publicly documented by other researchers/vendors ---------------------
+# Verify against your own traffic before assuming a specific device uses
+# exactly these hosts.
+#
+# Public-IP echo services (ipify.org, ipinfo.io, icanhazip.com) are left out on
+# purpose: they are not telemetry, and this guide's own commands call them.
+
+# Vizio -- Inscape ACR/analytics (subject of a 2017 FTC settlement over
+# undisclosed viewing-data collection)
+inscape.metrics.vizio.com
+
+# Samsung -- smart-TV ACR
+samsungacr.com
+
+# Roku -- platform telemetry/ads
+scribe.logs.roku.com
+ads.roku.com
+
+# Nielsen -- audience measurement, widely embedded in streaming apps
+imrworldwide.com
+
+# Amazon Fire TV -- device telemetry (amazon-adsystem.com is already in
+# the built-in ad-tech list; this is the separate device-metrics pipeline)
+device-metrics-us.amazon.com
+
+# Microsoft Windows -- diagnostic data / "Connected User Experiences and
+# Telemetry" (CUET) endpoints. These are self-published by Microsoft (see
+# their "Manage connections from Windows operating system components to
+# Microsoft services" doc -- search that exact title for the current,
+# version-specific list; it changes across Windows releases, so treat
+# this as a snapshot, not a guarantee):
+v10.events.data.microsoft.com
+v10c.events.data.microsoft.com
+v20.events.data.microsoft.com
+watson.telemetry.microsoft.com
+oca.telemetry.microsoft.com
+vortex.data.microsoft.com
+vortex-win.data.microsoft.com
+settings-win.data.microsoft.com
+telecommand.telemetry.microsoft.com
+telemetry.microsoft.com
