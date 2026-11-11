@@ -65,7 +65,7 @@ is degraded, it points you directly to the relevant guide file below.
 9. **[`09_BACKGROUND_WATCHDOG.md`](09_BACKGROUND_WATCHDOG.md)** — Python watchdog (`scripts/net_watchdog.py`) running
    unattended diagnostics on schedule to alert immediately on periodic gaps or packet loss.
 10. **[`10_GPN_VS_VPN_AND_MULTI_WAN.md`](10_GPN_VS_VPN_AND_MULTI_WAN.md)** — GPN route optimization vs VPN vs true multi-WAN bonding.
-11. **[`11_SSH_MULTIPLEXING_AND_MOSH.md`](11_SSH_MULTIPLEXING_AND_MOSH.md)** — SSH ControlMaster for fast scripted commands (~17x speedup)
+11. **[`11_SSH_MULTIPLEXING_AND_MOSH.md`](11_SSH_MULTIPLEXING_AND_MOSH.md)** — SSH ControlMaster for fast repeated scripted commands, and Mosh for flaky links
     vs Mosh for human typing.
 12. **[`12_SECURITY_AND_PARASITIC_TRAFFIC.md`](12_SECURITY_AND_PARASITIC_TRAFFIC.md)** — ad-tech/ACR telemetry detection, unknown LAN devices,
     and sustained anomalous streams.
